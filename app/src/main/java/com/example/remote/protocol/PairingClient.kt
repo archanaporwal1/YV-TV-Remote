@@ -124,6 +124,7 @@ class PairingClient(private val certificateManager: CertificateManager) {
         val tls = certificateManager.createTlsSessionContext()
         socket =
           (tls.sslContext.socketFactory.createSocket() as SSLSocket).apply {
+            useClientMode = true
             soTimeout = HANDSHAKE_TIMEOUT_MS
             connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
             startHandshake()

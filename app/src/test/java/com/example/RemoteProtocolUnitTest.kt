@@ -134,4 +134,25 @@ class RemoteProtocolUnitTest {
     assertEquals("inception", decoded.remoteImeBatchEdit.getEditInfo(0).textFieldStatus.value)
     assertEquals(3, decoded.remoteImeBatchEdit.imeCounter)
   }
+
+  @Test
+  fun certificateUnknownSslExceptionTriggersPairingDetection() {
+    val boringSslReadAlert =
+      javax.net.ssl.SSLException(
+        "Read error: ssl=0xb400007df44ea418: Failure in SSL library, usually a protocol error error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN"
+      )
+    org.junit.Assert.assertTrue(
+      com.example.remote.protocol.RemoteControlClient.isCertificateOrHandshakeError(boringSslReadAlert)
+    )
+    org.junit.Assert.assertTrue(
+      com.example.remote.protocol.RemoteControlClient.isCertificateOrHandshakeError(
+        javax.net.ssl.SSLHandshakeException("Handshake failed")
+      )
+    )
+    org.junit.Assert.assertFalse(
+      com.example.remote.protocol.RemoteControlClient.isCertificateOrHandshakeError(
+        javax.net.ssl.SSLException("Connection timed out")
+      )
+    )
+  }
 }

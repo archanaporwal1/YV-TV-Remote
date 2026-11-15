@@ -18,6 +18,7 @@ import com.example.remote.protocol.CertificateManager
 import com.example.remote.protocol.PairingClient
 import com.example.remote.protocol.RemoteControlClient
 import com.example.remote.protocol.TvImeState
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -100,6 +101,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   private var activePairingSession: PairingClient.ActivePairingSession? = null
   private var pendingTarget: PendingConnectionTarget? = null
   private var autoConnectAttempted = false
+  private var postPairingReconnectRetryAvailable = false
 
   init {
     loadStoredState()
@@ -183,6 +185,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
           }
 
           is RemoteControlClient.SessionEvent.Connected -> {
+            postPairingReconnectRetryAvailable = false
             val target = pendingTarget
             if (target != null) {
               val saved =
@@ -214,11 +217,18 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
           is RemoteControlClient.SessionEvent.PairingRequired -> {
             val target = pendingTarget
             if (target != null) {
-              initiatePairing(target)
+              if (postPairingReconnectRetryAvailable) {
+                postPairingReconnectRetryAvailable = false
+                delay(500L)
+                remoteClient.connect(target.ipAddress, target.controlPort)
+              } else {
+                initiatePairing(target)
+              }
             }
           }
 
           is RemoteControlClient.SessionEvent.Error -> {
+            postPairingReconnectRetryAvailable = false
             val target = pendingTarget
             _uiState.update {
               it.copy(
@@ -321,6 +331,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
   private fun connectWithAutoPair(target: PendingConnectionTarget) {
     cancelPairingInternal()
+    postPairingReconnectRetryAvailable = false
     pendingTarget = target
     discoveryManager.stopScan()
     viewModelScope.launch {
@@ -416,6 +427,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
             )
           prefsStore.setLastConnectedTvId(saved.id)
           _uiState.update { it.copy(savedConnections = prefsStore.loadSavedConnections()) }
+          postPairingReconnectRetryAvailable = true
+          delay(300L)
           remoteClient.connect(target.ipAddress, target.controlPort)
         }
 

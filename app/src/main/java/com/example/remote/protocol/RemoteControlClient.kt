@@ -31,6 +31,7 @@ import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.io.OutputStream
 import java.net.InetSocketAddress
+import javax.net.ssl.SSLException
 import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLSocket
 
@@ -76,6 +77,7 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
           val tls = certificateManager.createTlsSessionContext()
           val sslSocket =
             (tls.sslContext.socketFactory.createSocket() as SSLSocket).apply {
+              useClientMode = true
               keepAlive = true
               tcpNoDelay = true
               connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
@@ -91,7 +93,7 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
               runReaderLoop(sslSocket)
             }
           true
-        } catch (e: SSLHandshakeException) {
+        } catch (e: SSLException) {
           _sessionEvent.value =
             SessionEvent.PairingRequired(
               "TV requires pairing before remote control access (${e.message ?: "TLS rejected"})."
@@ -111,9 +113,11 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
 
   private suspend fun runReaderLoop(sslSocket: SSLSocket) {
     val input = sslSocket.inputStream
+    var hasReceivedMessage = false
     try {
       while (scope?.isActive == true && !sslSocket.isClosed) {
         val frameBytes = DelimitedStreamHelper.readDelimitedBytes(input) ?: break
+        hasReceivedMessage = true
         val message = RemoteMessage.parseFrom(frameBytes)
 
         when {
@@ -180,12 +184,30 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
           }
         }
       }
-      if (_sessionEvent.value == SessionEvent.Connected || _sessionEvent.value == SessionEvent.Connecting) {
-        _sessionEvent.value = SessionEvent.Disconnected
+      if (scope?.isActive == true) {
+        if (!hasReceivedMessage && _sessionEvent.value == SessionEvent.Connecting) {
+          _sessionEvent.value =
+            SessionEvent.PairingRequired(
+              "TV closed the remote channel before handshake completed. Starting pairing..."
+            )
+        } else if (
+          _sessionEvent.value == SessionEvent.Connected ||
+          _sessionEvent.value == SessionEvent.Connecting
+        ) {
+          _sessionEvent.value = SessionEvent.Disconnected
+        }
       }
-    } catch (e: SSLHandshakeException) {
-      _sessionEvent.value =
-        SessionEvent.PairingRequired("Certificate not trusted by TV. Please pair with PIN.")
+    } catch (e: SSLException) {
+      if (scope?.isActive == true) {
+        if (isCertificateOrHandshakeError(e) || !hasReceivedMessage) {
+          _sessionEvent.value =
+            SessionEvent.PairingRequired(
+              "Certificate not trusted by TV (${e.message ?: "SSLException"}). Starting pairing..."
+            )
+        } else {
+          _sessionEvent.value = SessionEvent.Error(e.message ?: "TLS connection to TV was lost.")
+        }
+      }
     } catch (e: Exception) {
       if (scope?.isActive == true) {
         _sessionEvent.value = SessionEvent.Error(e.message ?: "Connection to TV was lost.")
@@ -312,6 +334,17 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
         try {
           DelimitedStreamHelper.writeMessage(out, message)
           true
+        } catch (e: SSLException) {
+          _sessionEvent.value =
+            if (isCertificateOrHandshakeError(e)) {
+              SessionEvent.PairingRequired(
+                "Certificate rejected by TV (${e.message ?: "SSLException"}). Starting pairing..."
+              )
+            } else {
+              SessionEvent.Error(e.message ?: "Failed to send command to TV.")
+            }
+          cleanupSocketOnly()
+          false
         } catch (e: IOException) {
           _sessionEvent.value = SessionEvent.Error(e.message ?: "Failed to send command to TV.")
           cleanupSocketOnly()
@@ -343,6 +376,20 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
     const val DEFAULT_REMOTE_PORT = 6466
     private const val FEATURE_CODE_FULL = 622
     private const val CONNECT_TIMEOUT_MS = 8_000
+
+    fun isCertificateOrHandshakeError(error: SSLException): Boolean {
+      if (error is SSLHandshakeException) return true
+      val message = error.message?.uppercase().orEmpty()
+      return message.contains("CERTIFICATE_UNKNOWN") ||
+        message.contains("BAD_CERTIFICATE") ||
+        message.contains("UNKNOWN_CA") ||
+        message.contains("CERTIFICATE_REQUIRED") ||
+        message.contains("CERTIFICATE_REVOKED") ||
+        message.contains("CERTIFICATE_EXPIRED") ||
+        message.contains("SSLV3_ALERT") ||
+        message.contains("HANDSHAKE") ||
+        message.contains("ALERT")
+    }
 
     fun charToRemoteKeyCode(ch: Char): RemoteKeyCode? {
       return when (ch.lowercaseChar()) {

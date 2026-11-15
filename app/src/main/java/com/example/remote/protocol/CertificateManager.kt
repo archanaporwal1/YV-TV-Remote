@@ -8,31 +8,40 @@ import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import java.io.File
 import java.math.BigInteger
+import java.net.Socket
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.Principal
+import java.security.PrivateKey
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.security.interfaces.RSAPublicKey
 import java.util.Date
+import javax.net.ssl.KeyManager
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLEngine
 import javax.net.ssl.TrustManager
+import javax.net.ssl.X509ExtendedKeyManager
+import javax.net.ssl.X509KeyManager
 import javax.net.ssl.X509TrustManager
 
 class CertificateManager(context: Context) {
 
-  private val keystoreFile = File(context.filesDir, KEYSTORE_FILE_NAME)
+  val keystoreFile: File = File(context.filesDir, KEYSTORE_FILE_NAME)
   private val bcProvider = BouncyCastleProvider()
 
   @Synchronized
   fun ensureClientIdentity(): KeyStore {
     val keyStore = KeyStore.getInstance(KEYSTORE_TYPE)
-    if (keystoreFile.exists()) {
+    if (keystoreFile.exists() && keystoreFile.length() > 0L) {
       try {
         keystoreFile.inputStream().use { input ->
           keyStore.load(input, KEYSTORE_PASSWORD)
         }
-        if (keyStore.containsAlias(KEY_ALIAS) && keyStore.getCertificate(KEY_ALIAS) != null) {
+        val cert = keyStore.getCertificate(KEY_ALIAS) as? X509Certificate
+        val key = keyStore.getKey(KEY_ALIAS, KEYSTORE_PASSWORD) as? PrivateKey
+        if (cert != null && key != null) {
           return keyStore
         }
       } catch (_: Exception) {
@@ -78,8 +87,16 @@ class CertificateManager(context: Context) {
       arrayOf(certificate),
     )
 
-    keystoreFile.outputStream().use { output ->
+    keystoreFile.parentFile?.mkdirs()
+    val tempFile = File(keystoreFile.parentFile, "$KEYSTORE_FILE_NAME.tmp")
+    tempFile.outputStream().use { output ->
       keyStore.store(output, KEYSTORE_PASSWORD)
+    }
+    if (!tempFile.renameTo(keystoreFile)) {
+      keystoreFile.outputStream().use { output ->
+        keyStore.store(output, KEYSTORE_PASSWORD)
+      }
+      tempFile.delete()
     }
     return keyStore
   }
@@ -97,17 +114,106 @@ class CertificateManager(context: Context) {
         init(keyStore, KEYSTORE_PASSWORD)
       }
 
+    val rawKeyManagers = keyManagerFactory.keyManagers
+    check(!rawKeyManagers.isNullOrEmpty()) {
+      "KeyManagerFactory did not produce any KeyManagers for client certificate."
+    }
+
+    val keyManagers: Array<KeyManager> =
+      rawKeyManagers
+        .map { km ->
+          when (km) {
+            is X509ExtendedKeyManager -> ClientAliasFallbackExtendedKeyManager(km)
+            is X509KeyManager -> ClientAliasFallbackKeyManager(km)
+            else -> km
+          }
+        }
+        .toTypedArray()
+
     val trustManager = ServerCapturingTrustManager()
     val sslContext =
       SSLContext.getInstance("TLS").apply {
-        init(keyManagerFactory.keyManagers, arrayOf<TrustManager>(trustManager), SecureRandom())
+        init(keyManagers, arrayOf<TrustManager>(trustManager), SecureRandom())
       }
 
     return TlsContextResult(
       sslContext = sslContext,
+      keyManagers = keyManagers,
       trustManager = trustManager,
       clientPublicKey = getClientRsaPublicKey(),
     )
+  }
+
+  /**
+   * Ensures Conscrypt/OpenSSL always sends our self-signed client certificate from the saved .p12
+   * keystore even if the TV sends a non-empty issuer list in its TLS CertificateRequest.
+   */
+  private class ClientAliasFallbackExtendedKeyManager(
+    private val delegate: X509ExtendedKeyManager,
+  ) : X509ExtendedKeyManager() {
+    override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?): Array<String>? {
+      return delegate.getClientAliases(keyType, issuers)
+        ?: delegate.getClientAliases(keyType, null)
+    }
+
+    override fun chooseClientAlias(
+      keyType: Array<out String>?,
+      issuers: Array<out Principal>?,
+      socket: Socket?,
+    ): String? {
+      return delegate.chooseClientAlias(keyType, issuers, socket)
+        ?: delegate.chooseClientAlias(keyType, null, socket)
+        ?: KEY_ALIAS.takeIf { delegate.getCertificateChain(it) != null }
+    }
+
+    override fun chooseEngineClientAlias(
+      keyType: Array<out String>?,
+      issuers: Array<out Principal>?,
+      engine: SSLEngine?,
+    ): String? {
+      return delegate.chooseEngineClientAlias(keyType, issuers, engine)
+        ?: delegate.chooseEngineClientAlias(keyType, null, engine)
+        ?: KEY_ALIAS.takeIf { delegate.getCertificateChain(it) != null }
+    }
+
+    override fun getServerAliases(keyType: String?, issuers: Array<out Principal>?): Array<String>? =
+      delegate.getServerAliases(keyType, issuers)
+
+    override fun chooseServerAlias(
+      keyType: String?,
+      issuers: Array<out Principal>?,
+      socket: Socket?,
+    ): String? = delegate.chooseServerAlias(keyType, issuers, socket)
+
+    override fun chooseEngineServerAlias(
+      keyType: String?,
+      issuers: Array<out Principal>?,
+      engine: SSLEngine?,
+    ): String? = delegate.chooseEngineServerAlias(keyType, issuers, engine)
+
+    override fun getCertificateChain(alias: String?): Array<X509Certificate>? =
+      delegate.getCertificateChain(alias)
+
+    override fun getPrivateKey(alias: String?): PrivateKey? = delegate.getPrivateKey(alias)
+  }
+
+  private class ClientAliasFallbackKeyManager(
+    private val delegate: X509KeyManager,
+  ) : X509KeyManager by delegate {
+    override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?): Array<String>? {
+      return delegate.getClientAliases(keyType, issuers)
+        ?: delegate.getClientAliases(keyType, null)
+    }
+
+    override fun chooseClientAlias(
+      keyType: Array<out String>?,
+      issuers: Array<out Principal>?,
+      socket: Socket?,
+    ): String? {
+      return delegate.chooseClientAlias(keyType, issuers, socket)
+        ?: delegate.chooseClientAlias(keyType, null, socket)
+        ?: KEY_ALIAS.takeIf { delegate.getCertificateChain(it) != null }
+    }
   }
 
   class ServerCapturingTrustManager : X509TrustManager {
@@ -132,14 +238,15 @@ class CertificateManager(context: Context) {
 
   data class TlsContextResult(
     val sslContext: SSLContext,
+    val keyManagers: Array<KeyManager>,
     val trustManager: ServerCapturingTrustManager,
     val clientPublicKey: RSAPublicKey,
   )
 
   companion object {
-    private const val KEYSTORE_FILE_NAME = "yvtv_client_identity.p12"
+    const val KEYSTORE_FILE_NAME = "yvtv_client_identity.p12"
     private const val KEYSTORE_TYPE = "PKCS12"
-    private const val KEY_ALIAS = "androidtv_remote_client"
+    const val KEY_ALIAS = "androidtv_remote_client"
     private val KEYSTORE_PASSWORD = "yvtv_remote_keystore_pass".toCharArray()
 
     /**

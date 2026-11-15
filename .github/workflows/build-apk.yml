@@ -58,7 +58,23 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: gradle assembleRelease
+          STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          PASS="${KEYSTORE_PASSWORD:-TvRemotePermanent2026}"
+          ALIAS="${KEY_ALIAS:-tvremote}"
+          KEYPASS="${KEY_PASSWORD:-$PASS}"
+
+          gradle assembleRelease \
+            -PstorePassword="$PASS" \
+            -PkeyAlias="$ALIAS" \
+            -PkeyPassword="$KEYPASS" \
+            -PKEYSTORE_PASSWORD="$PASS" \
+            -PKEY_ALIAS="$ALIAS" \
+            -PKEY_PASSWORD="$KEYPASS" \
+            -Pandroid.injected.signing.store.file="$(pwd)/my-upload-key.jks" \
+            -Pandroid.injected.signing.store.password="$PASS" \
+            -Pandroid.injected.signing.key.alias="$ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEYPASS"
 
       - name: Upload Signed APK & Keystore Backup
         uses: actions/upload-artifact@v4

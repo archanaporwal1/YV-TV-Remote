@@ -1,0 +1,91 @@
+name: Build & Sign Smart TV Remote APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare Permanent Keystore (Auto-Generate if Missing)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          PASS="${KEYSTORE_PASSWORD:-TvRemotePermanent2026}"
+          ALIAS="${KEY_ALIAS:-tvremote}"
+
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "No KEYSTORE_BASE64 secret found. Generating a permanent 100-year keystore..."
+            keytool -genkeypair -noprompt \
+              -keystore app/release-key.jks \
+              -keyalg RSA -keysize 2048 -validity 36500 \
+              -alias "$ALIAS" \
+              -storepass "$PASS" \
+              -keypass "$PASS" \
+              -dname "CN=SmartTVRemote, OU=Mobile, O=App, L=Hyderabad, S=Telangana, C=IN"
+
+            echo "=================================================================="
+            echo "SAVE THESE VALUES ONCE IN GITHUB SETTINGS -> SECRETS -> ACTIONS:"
+            echo "1. KEYSTORE_PASSWORD = $PASS"
+            echo "2. KEY_ALIAS         = $ALIAS"
+            echo "3. KEY_PASSWORD      = $PASS"
+            echo "4. Permanent SHA-1 Fingerprint:"
+            keytool -list -v -keystore app/release-key.jks -alias "$ALIAS" -storepass "$PASS" | grep "SHA1:"
+            echo "5. KEYSTORE_BASE64 (Copy the single line below):"
+            base64 -w 0 app/release-key.jks
+            echo ""
+            echo "=================================================================="
+          else
+            echo "Using saved permanent KEYSTORE_BASE64 from GitHub Secrets..."
+            echo "$KEYSTORE_BASE64" | base64 -d > app/release-key.jks
+          fi
+
+      - name: Build Release APK
+        run: gradle assembleRelease
+
+      - name: Zipalign & Sign APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          PASS="${KEYSTORE_PASSWORD:-TvRemotePermanent2026}"
+          ALIAS="${KEY_ALIAS:-tvremote}"
+          KEYPASS="${KEY_PASSWORD:-$PASS}"
+
+          BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -maxdepth 1 | sort -V | tail -n 1)
+          UNSIGNED_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+
+          $BUILD_TOOLS/zipalign -v -p 4 "$UNSIGNED_APK" app/build/outputs/apk/release/aligned.apk
+          $BUILD_TOOLS/apksigner sign \
+            --ks app/release-key.jks \
+            --ks-pass pass:"$PASS" \
+            --ks-key-alias "$ALIAS" \
+            --key-pass pass:"$KEYPASS" \
+            --out app/build/outputs/apk/release/SmartTVRemote-signed.apk \
+            app/build/outputs/apk/release/aligned.apk
+
+      - name: Upload Signed APK & Keystore Backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartTVRemote-Build-Package
+          path: |
+            app/build/outputs/apk/release/SmartTVRemote-signed.apk
+            app/release-key.jks

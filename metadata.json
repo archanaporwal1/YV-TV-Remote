@@ -1,0 +1,6 @@
+{
+  "name": "YV-TV Remote",
+  "description": "Native Android Smart TV Remote app using Android TV Remote Protocol v2 over local Wi-Fi with user profiles, saved TVs, tactile D-Pad/Touchpad, haptics, sound effects, and OTT app shortcuts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

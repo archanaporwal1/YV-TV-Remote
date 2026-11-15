@@ -25,7 +25,7 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Prepare Keystore & Match Alias
+      - name: Prepare Permanent Keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -33,11 +33,11 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           PASS="${KEYSTORE_PASSWORD:-TvRemotePermanent2026}"
-          ALIAS="${KEY_ALIAS:-key0}"
+          ALIAS="${KEY_ALIAS:-tvremote}"
           KEYPASS="${KEY_PASSWORD:-$PASS}"
 
           if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "Generating permanent 100-year keystore at my-upload-key.jks with alias '$ALIAS'..."
+            echo "Generating permanent 100-year keystore at my-upload-key.jks..."
             keytool -genkeypair -noprompt \
               -keystore my-upload-key.jks \
               -keyalg RSA -keysize 2048 -validity 36500 \
@@ -54,50 +54,43 @@ jobs:
           else
             echo "Decoding saved KEYSTORE_BASE64 into my-upload-key.jks..."
             echo "$KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
-            
-            # Verify what alias actually exists inside the decoded keystore
-            EXISTING_ALIAS=$(keytool -list -keystore my-upload-key.jks -storepass "$PASS" | grep "PrivateKeyEntry" | cut -d',' -f1)
-            echo "Alias inside keystore: $EXISTING_ALIAS"
-            
-            # If GitHub secret KEY_ALIAS differs from the alias inside the keystore, clone the entry so both work
-            if [ -n "$EXISTING_ALIAS" ] && [ "$EXISTING_ALIAS" != "$ALIAS" ]; then
-              keytool -keyclone -noprompt \
-                -keystore my-upload-key.jks \
-                -storepass "$PASS" \
-                -alias "$EXISTING_ALIAS" \
-                -dest "$ALIAS" \
-                -keypass "$KEYPASS" \
-                -new "$KEYPASS" || true
-            fi
           fi
 
-      - name: Build Signed Release APK
+      - name: Build Unsigned Release APK
+        run: |
+          # Remove hardcoded signingConfig from app/build.gradle.kts during CI build so apksigner handles it cleanly
+          sed -i 's/signingConfig = signingConfigs.getByName("release")//g' app/build.gradle.kts || true
+          sed -i 's/signingConfig signingConfigs.release//g' app/build.gradle.kts || true
+          sed -i 's/signingConfig signingConfigs.getByName("release")//g' app/build.gradle.kts || true
+          gradle assembleRelease
+
+      - name: Zipalign & Sign Release APK
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-          STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: |
           PASS="${KEYSTORE_PASSWORD:-TvRemotePermanent2026}"
-          ALIAS="${KEY_ALIAS:-key0}"
+          ALIAS="${KEY_ALIAS:-tvremote}"
           KEYPASS="${KEY_PASSWORD:-$PASS}"
 
-          gradle assembleRelease \
-            -PstorePassword="$PASS" \
-            -PkeyAlias="$ALIAS" \
-            -PkeyPassword="$KEYPASS" \
-            -PKEYSTORE_PASSWORD="$PASS" \
-            -PKEY_ALIAS="$ALIAS" \
-            -PKEY_PASSWORD="$KEYPASS" \
-            -Pandroid.injected.signing.store.file="$(pwd)/my-upload-key.jks" \
-            -Pandroid.injected.signing.store.password="$PASS" \
-            -Pandroid.injected.signing.key.alias="$ALIAS" \
-            -Pandroid.injected.signing.key.password="$KEYPASS"
+          # Auto-detect the exact alias inside my-upload-key.jks so there is never an alias mismatch
+          DETECTED_ALIAS=$(keytool -list -keystore my-upload-key.jks -storepass "$PASS" | grep "PrivateKeyEntry" | cut -d',' -f1 | head -n 1)
+          FINAL_ALIAS="${DETECTED_ALIAS:-$ALIAS}"
 
-      - name: Rename APK for Clean Download
-        run: |
-          APK_FILE=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
-          cp "$APK_FILE" YV-TV-Remote-v${{ github.run_number }}.apk
+          BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -maxdepth 1 | sort -V | tail -n 1)
+          UNSIGNED_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+
+          $BUILD_TOOLS/zipalign -v -p 4 "$UNSIGNED_APK" aligned.apk
+          $BUILD_TOOLS/apksigner sign \
+            --ks my-upload-key.jks \
+            --ks-pass pass:"$PASS" \
+            --ks-key-alias "$FINAL_ALIAS" \
+            --key-pass pass:"$KEYPASS" \
+            --out YV-TV-Remote-v${{ github.run_number }}.apk \
+            aligned.apk
+
+          $BUILD_TOOLS/apksigner verify --verbose YV-TV-Remote-v${{ github.run_number }}.apk
 
       - name: Publish APK to GitHub Releases
         uses: softprops/action-gh-release@v2

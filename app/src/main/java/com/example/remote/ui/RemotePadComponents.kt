@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.Input
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
@@ -34,7 +35,6 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.FastForward
 import androidx.compose.material.icons.rounded.FastRewind
 import androidx.compose.material.icons.rounded.Home
-import androidx.compose.material.icons.rounded.Input
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Menu
@@ -406,7 +406,7 @@ fun PrimaryNavigationRow(
       modifier = Modifier.weight(1f),
     )
     NavActionButton(
-      icon = Icons.Rounded.Input,
+      icon = Icons.AutoMirrored.Rounded.Input,
       label = "Input",
       testTag = "btn_input",
       onClick = { onKey(RemoteKeyCode.KEYCODE_TV_INPUT, FeedbackCue.NAV_TICK) },

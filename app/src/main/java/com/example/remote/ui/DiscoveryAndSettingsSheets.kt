@@ -33,6 +33,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.BookmarkAdd
 import androidx.compose.material.icons.rounded.CastConnected
@@ -47,7 +48,6 @@ import androidx.compose.material.icons.rounded.SettingsRemote
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material.icons.rounded.Vibration
-import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.WifiFind
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -1268,7 +1268,7 @@ fun SettingsModalSheet(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                   ) {
                     Icon(
-                      imageVector = Icons.Rounded.VolumeUp,
+                      imageVector = Icons.AutoMirrored.Rounded.VolumeUp,
                       contentDescription = null,
                       tint = MaterialTheme.colorScheme.onSurfaceVariant,
                       modifier = Modifier.size(18.dp),

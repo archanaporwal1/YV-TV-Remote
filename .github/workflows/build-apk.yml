@@ -23,17 +23,27 @@ jobs:
       - name: Keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: |
+          PASS="${KEYSTORE_PASSWORD:-TvRemotePermanent2026}"
           echo "$KEYSTORE_BASE64" | tr -d ' \n\r' | base64 -d > my-upload-key.jks
-          keytool -list -keystore my-upload-key.jks -storepass TvRemotePermanent2026
+          keytool -list -keystore my-upload-key.jks -storepass "$PASS"
       - name: Inject Updater
         env:
           REPO: ${{ github.repository }}
         run: python3 inject_updater.py
       - name: Build & Sign
         env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           REPO: ${{ github.repository }}
         run: |
+          PASS="${KEYSTORE_PASSWORD:-TvRemotePermanent2026}"
+          ALIAS="${KEY_ALIAS:-tvremote}"
+          KEYPASS="${KEY_PASSWORD:-$PASS}"
+          DETECTED_ALIAS=$(keytool -list -keystore my-upload-key.jks -storepass "$PASS" | grep "PrivateKeyEntry" | cut -d',' -f1 | head -n 1)
+          FINAL_ALIAS="${DETECTED_ALIAS:-$ALIAS}"
           VER="1.0.${{ github.run_number }}"
           echo "VER=$VER" >> $GITHUB_ENV
           sed -i 's/signingConfig = signingConfigs.getByName("release")//g' app/build.gradle.kts || true
@@ -43,7 +53,7 @@ jobs:
           BT=$(find $ANDROID_HOME/build-tools -maxdepth 1 | sort -V | tail -n 1)
           APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
           $BT/zipalign -p 4 "$APK" aligned.apk
-          $BT/apksigner sign --ks my-upload-key.jks --ks-pass pass:TvRemotePermanent2026 --ks-key-alias tvremote --out "YV-TV-Remote-v${VER}.apk" aligned.apk
+          $BT/apksigner sign --ks my-upload-key.jks --ks-pass pass:"$PASS" --ks-key-alias "$FINAL_ALIAS" --key-pass pass:"$KEYPASS" --out "YV-TV-Remote-v${VER}.apk" aligned.apk
           NOTES=$(git log -1 --pretty=%s || echo "Automated release")
           NOTES="$NOTES" python3 -c 'import json,os;v=os.environ["VER"];r=os.environ["REPO"];open("update-manifest.json","w").write(json.dumps({"versionCode":int("${{ github.run_number }}"),"versionName":v,"title":f"YV TV Remote v{v}","notes":os.environ["NOTES"],"apkUrl":f"https://github.com{r}/releases/download/v{v}/YV-TV-Remote-v{v}.apk"},indent=2))'
       - uses: softprops/action-gh-release@v2

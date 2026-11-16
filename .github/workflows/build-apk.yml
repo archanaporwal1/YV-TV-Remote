@@ -67,7 +67,7 @@ jobs:
           echo "version_name=$FINAL_VER" >> $GITHUB_OUTPUT
           echo "version_code=$FINAL_CODE" >> $GITHUB_OUTPUT
 
-      - name: Inject In-App Auto-Update Popup
+      - name: Inject In-App Downloader & Auto-Update Popup
         env:
           REPO: ${{ github.repository }}
         run: |
@@ -77,25 +77,49 @@ jobs:
           m_path = "app/src/main/AndroidManifest.xml"
           if os.path.exists(m_path):
               txt = open(m_path).read()
-              if "android.permission.INTERNET" not in txt:
-                  open(m_path, "w").write(txt.replace("<application", '<uses-permission android:name="android.permission.INTERNET" />\n    <application', 1))
+              for perm in ["android.permission.INTERNET", "android.permission.REQUEST_INSTALL_PACKAGES"]:
+                  if perm not in txt:
+                      txt = txt.replace("<application", f'<uses-permission android:name="{perm}" />\n    <application', 1)
+              if "auto_updater_paths" not in txt:
+                  provider = '''        <provider
+                      android:name="androidx.core.content.FileProvider"
+                      android:authorities="${applicationId}.autoupdater.provider"
+                      android:exported="false"
+                      android:grantUriPermissions="true">
+                      <meta-data
+                          android:name="android.support.FILE_PROVIDER_PATHS"
+                          android:resource="@xml/auto_updater_paths" />
+                  </provider>\n    </application>'''
+                  txt = txt.replace("</application>", provider, 1)
+              open(m_path, "w").write(txt)
+
+          os.makedirs("app/src/main/res/xml", exist_ok=True)
+          open("app/src/main/res/xml/auto_updater_paths.xml", "w").write('<?xml version="1.0" encoding="utf-8"?>\n<paths>\n    <cache-path name="updates" path="." />\n</paths>\n')
+
           files = glob.glob("app/src/main/**/MainActivity.kt", recursive=True) + glob.glob("app/src/main/**/MainActivity.java", recursive=True)
           if not files: exit(0)
-          tf = files[0]
+          tf = files.pop(0)
           src = open(tf).read()
-          pm = re.search(r'^\s*package\s+([a-zA-Z0-9_.]+)', src, re.M)
-          pkg = pm.group(1) if pm else "com.tvremote.app"
-          code = f'''package {pkg}
+          pm = re.search(r'^\s*(package\s+[^\r\n;]+)', src, re.M)
+          pkg_line = pm.group(1).strip() if pm else "package com.tvremote.app"
+
+          code = f'''{pkg_line}
           import android.app.AlertDialog
+          import android.app.ProgressDialog
           import android.content.*
           import android.net.Uri
           import android.os.*
+          import android.provider.Settings
+          import androidx.core.content.FileProvider
           import org.json.JSONObject
+          import java.io.File
           import java.net.*
           import kotlin.concurrent.thread
+
           object AutoAppUpdater {{
-              private const val URL_STR = "https://github.com/{repo}/releases/latest/download/update-manifest.json"
+              private const val URL_STR = "https://github.com{repo}/releases/latest/download/update-manifest.json"
               private var done = false
+
               @JvmStatic fun checkForUpdate(ctx: Context) {{
                   if (done) return; done = true
                   thread {{
@@ -108,75 +132,67 @@ jobs:
                           val cc = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode.toInt() else @Suppress("DEPRECATION") pi.versionCode
                           if (lc > cc) Handler(Looper.getMainLooper()).post {{
                               try {{
-                                  AlertDialog.Builder(ctx).setTitle("Update Available (v$ln)")
-                                      .setMessage("What's New:\\n$notes\\n\\nTap Update Now to install.")
-                                      .setPositiveButton("Update Now") {{ _, _ -> ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(apk))) }}
-                                      .setNegativeButton("Later", null).show()
+                                  AlertDialog.Builder(ctx)
+                                      .setTitle("Update Available (v$ln)")
+                                      .setMessage("What's New:\\n$notes\\n\\nTap Update Now to download and install inside the app.")
+                                      .setPositiveButton("Update Now") {{ _, _ -> startInAppUpdate(ctx, apk) }}
+                                      .setNegativeButton("Later", null)
+                                      .show()
                               }} catch (_: Exception) {{}}
                           }}
                       }} catch (_: Exception) {{}}
                   }}
               }}
-          }}'''
-          open(os.path.join(os.path.dirname(tf), "AutoAppUpdater.kt"), "w").write("\n".join(l[10:] if l.startswith("          ") else l for l in code.splitlines()))
-          if "AutoAppUpdater.checkForUpdate" not in src:
-              rep = r'\1\n        AutoAppUpdater.checkForUpdate(this)' if tf.endswith(".kt") else r'\1\n        AutoAppUpdater.checkForUpdate(this);'
-              s2, n = re.subn(r'(super\.onCreate\([^\)]*\);?)', rep, src, count=1)
-              if n > 0: open(tf, "w").write(s2); print("✅ Injected AutoAppUpdater into", tf)
-          EOF
 
-      - name: Build Unsigned Release APK
-        run: |
-          sed -i 's/signingConfig = signingConfigs.getByName("release")//g' app/build.gradle.kts || true
-          sed -i 's/signingConfig signingConfigs.release//g' app/build.gradle.kts || true
-          sed -i 's/signingConfig signingConfigs.getByName("release")//g' app/build.gradle.kts || true
-          cat << 'EOF' > ci-version.init.gradle
-          allprojects {
-              plugins.withId("com.android.application") {
-                  android { defaultConfig {
-                      versionCode = project.property("APP_VERSION_CODE").toString().toInteger()
-                      versionName = project.property("APP_VERSION_NAME").toString()
-                  } }
-              }
-          }
-          EOF
-          gradle assembleRelease --init-script ci-version.init.gradle \
-            -PAPP_VERSION_CODE=${{ steps.meta.outputs.version_code }} \
-            -PAPP_VERSION_NAME=${{ steps.meta.outputs.version_name }} \
-            -PRELEASE_REPO=${{ github.repository }}
+              private fun startInAppUpdate(ctx: Context, apkUrl: String) {{
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !ctx.packageManager.canRequestPackageInstalls()) {{
+                      AlertDialog.Builder(ctx)
+                          .setTitle("Permission Required")
+                          .setMessage("Please allow 'Install unknown apps' for this app so it can update itself directly.")
+                          .setPositiveButton("Allow") {{ _, _ ->
+                              ctx.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${{ctx.packageName}}")))
+                          }}
+                          .setNegativeButton("Cancel", null)
+                          .show()
+                      return
+                  }}
 
-      - name: Zipalign, Sign & Verify Release APK
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          PASS="${KEYSTORE_PASSWORD:-TvRemotePermanent2026}"
-          ALIAS="${KEY_ALIAS:-tvremote}"
-          KEYPASS="${KEY_PASSWORD:-$PASS}"
-          DETECTED_ALIAS=$(keytool -list -keystore my-upload-key.jks -storepass "$PASS" | grep "PrivateKeyEntry" | cut -d',' -f1 | head -n 1)
-          FINAL_ALIAS="${DETECTED_ALIAS:-$ALIAS}"
-          BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -maxdepth 1 | sort -V | tail -n 1)
-          UNSIGNED_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
-          VER_NAME="${{ steps.meta.outputs.version_name }}"
-          VER_CODE="${{ steps.meta.outputs.version_code }}"
-          APK_FILE="YV-TV-Remote-v${VER_NAME}.apk"
-          $BUILD_TOOLS/zipalign -v -p 4 "$UNSIGNED_APK" aligned.apk
-          $BUILD_TOOLS/apksigner sign --ks my-upload-key.jks --ks-pass pass:"$PASS" --ks-key-alias "$FINAL_ALIAS" --key-pass pass:"$KEYPASS" --out "$APK_FILE" aligned.apk
-          $BUILD_TOOLS/apksigner verify --verbose "$APK_FILE"
-          RELEASE_NOTES=$(git log -1 --pretty=%s || echo "Automated release build")
-          VER_CODE="$VER_CODE" VER_NAME="$VER_NAME" APK_FILE="$APK_FILE" REPO="${{ github.repository }}" RELEASE_NOTES="$RELEASE_NOTES" python3 -c '
-          import json, os
-          m = {"versionCode": int(os.environ["VER_CODE"]), "versionName": os.environ["VER_NAME"], "tag": "v" + os.environ["VER_NAME"], "title": "YV TV Remote v" + os.environ["VER_NAME"], "notes": os.environ["RELEASE_NOTES"], "apkUrl": "https://github.com/" + os.environ["REPO"] + "/releases/download/v" + os.environ["VER_NAME"] + "/" + os.environ["APK_FILE"], "releaseUrl": "https://github.com/" + os.environ["REPO"] + "/releases/tag/v" + os.environ["VER_NAME"]}
-          open("update-manifest.json", "w").write(json.dumps(m, indent=2))
-          '
+                  @Suppress("DEPRECATION")
+                  val dlg = ProgressDialog(ctx).apply {{
+                      setTitle("Downloading Update")
+                      setMessage("Please wait...")
+                      setProgressStyle(ProgressDialog.STYLE_HORIZONTAL)
+                      isIndeterminate = false
+                      max = 100
+                      setCancelable(false)
+                      show()
+                  }}
 
-      - name: Publish APK & Update Manifest to GitHub Releases
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.meta.outputs.version_name }}
-          name: YV TV Remote v${{ steps.meta.outputs.version_name }}
-          body: "Automated signed release v${{ steps.meta.outputs.version_name }} (Build #${{ steps.meta.outputs.version_code }})"
-          files: |
-            YV-TV-Remote-v${{ steps.meta.outputs.version_name }}.apk
-            update-manifest.json
+                  thread {{
+                      try {{
+                          val conn = (URL(apkUrl).openConnection() as HttpURLConnection).apply {{
+                              instanceFollowRedirects = true
+                              connectTimeout = 15000
+                              readTimeout = 30000
+                          }}
+                          val total = conn.contentLength
+                          val outFile = File(ctx.cacheDir, "app-update.apk")
+                          conn.inputStream.use {{ input ->
+                              outFile.outputStream().use {{ output ->
+                                  val buf = ByteArray(8192)
+                                  var downloaded = 0
+                                  var read: Int
+                                  while (input.read(buf).also {{ read = it }} != -1) {{
+                                      output.write(buf, 0, read)
+                                      downloaded += read
+                                      if (total > 0) {{
+                                          val pct = ((downloaded * 100L) / total).toInt()
+                                          Handler(Looper.getMainLooper()).post {{ dlg.progress = pct }}
+                                      }}
+                                  }}
+                              }}
+                          }}
+                          Handler(Looper.getMainLooper()).post {{
+                              dlg.dismiss()
+                              installApk(ctx, outFile)
+                          }}

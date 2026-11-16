@@ -53,7 +53,12 @@ object TvAppShortcuts {
             "com.google.android.youtube.googletv",
             "com.google.android.youtube",
           ),
-        nativeSchemes = listOf("vnd.youtube://"),
+        nativeSchemes =
+          listOf(
+            "vnd.youtube.launch://www.youtube.com",
+            "vnd.youtube://www.youtube.com",
+            "vnd.youtube://",
+          ),
       ),
       TvAppShortcut(
         id = "netflix",
@@ -79,7 +84,7 @@ object TvAppShortcuts {
             "com.amazon.amazonvideo.livingroom",
             "com.amazon.avod.thirdpartyclient",
           ),
-        nativeSchemes = listOf("primevideo://"),
+        nativeSchemes = listOf("primevideo://", "aiv://"),
       ),
       TvAppShortcut(
         id = "jiocinema",
@@ -92,7 +97,7 @@ object TvAppShortcuts {
             "com.jio.media.stb.ondemand",
             "com.jio.media.ondemand",
           ),
-        nativeSchemes = listOf("jiocinema://"),
+        nativeSchemes = listOf("jiocinema://home", "jiocinema://"),
       ),
       TvAppShortcut(
         id = "hotstar",
@@ -102,12 +107,12 @@ object TvAppShortcuts {
         accentColor = Color(0xFF1F80E0),
         packageNames =
           listOf(
-            "in.startv.hotstar.dplus.tv",
-            "in.startv.hotstartvonly",
             "in.startv.hotstar",
+            "in.startv.hotstartvonly",
+            "in.startv.hotstar.dplus.tv",
             "com.hotstar.disney",
           ),
-        nativeSchemes = listOf("hotstar://"),
+        nativeSchemes = listOf("hotstar://home", "hotstar://"),
       ),
       TvAppShortcut(
         id = "sonyliv",
@@ -116,7 +121,7 @@ object TvAppShortcuts {
         appLink = "https://www.sonyliv.com",
         accentColor = Color(0xFFF5A623),
         packageNames = listOf("com.sonyliv"),
-        nativeSchemes = listOf("sonyliv://"),
+        nativeSchemes = listOf("sonyliv://home", "sonyliv://"),
       ),
       TvAppShortcut(
         id = "zee5",
@@ -125,7 +130,7 @@ object TvAppShortcuts {
         appLink = "https://www.zee5.com",
         accentColor = Color(0xFFA259FF),
         packageNames = listOf("com.graymatrix.did"),
-        nativeSchemes = listOf("zee5://"),
+        nativeSchemes = listOf("zee5://home", "zee5://"),
       ),
       TvAppShortcut(
         id = "sunnxt",
@@ -134,7 +139,7 @@ object TvAppShortcuts {
         appLink = "https://www.sunnxt.com",
         accentColor = Color(0xFFFF7A00),
         packageNames = listOf("com.suntv.sunnxt"),
-        nativeSchemes = listOf("sunnxt://"),
+        nativeSchemes = listOf("sunnxt://home", "sunnxt://"),
       ),
       TvAppShortcut(
         id = "jiotv",
@@ -350,6 +355,11 @@ object TvAppShortcuts {
       put("altbalaji.com", listOf("com.balaji.alt") to listOf("altbalaji://"))
       put("lionsgateplay.com", listOf("com.lionsgateplay.videoapp") to emptyList())
       put("kodi.tv", listOf("org.xbmc.kodi") to listOf("kodi://"))
+      put(
+        "jiohotstar.com",
+        listOf("in.startv.hotstar", "in.startv.hotstartvonly", "in.startv.hotstar.dplus.tv") to
+          listOf("hotstar://home", "hotstar://"),
+      )
     }
 
   private val reverseDnsPrefixes = setOf("com", "org", "net", "tv", "in", "de", "uk", "jp", "io")
@@ -420,17 +430,20 @@ object TvAppShortcuts {
         ""
       }
 
-    // Native-first candidates (never match TV browsers because every candidate either
-    // binds explicit package=<id> or uses an app-only custom URI scheme).
+    // Native-first candidates (never hit TV browsers):
+    // 1. Verified app-only custom URI schemes (highest compatibility with Android TV ACTION_VIEW)
+    // 2. Package-scoped Leanback/View Intent URIs (supported on TV firmwares using URI_INTENT_SCHEME)
+    // 3. Direct Google Play package launcher URI (market://launch?id=<primary_pkg>) so apps without
+    //    custom schemes (e.g., Prime Video, Hotstar, SonyLIV, ZEE5) still open natively when installed
+    // 4. Package-scoped standard LAUNCHER intents & explicit non-http user link
     val nativeCandidates =
       buildList {
-        // 1. Explicit Leanback TV launcher Intent scoped to the app package
+        addAll(resolvedSchemes)
         resolvedPackages.forEach { pkg ->
           add(
             "intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LEANBACK_LAUNCHER;package=$pkg;end"
           )
         }
-        // 2. Package-scoped ACTION_VIEW Intent for TV firmware that only dispatches VIEW intents
         if (isWebFallback && hostAndPath.isNotEmpty()) {
           resolvedPackages.forEach { pkg ->
             add(
@@ -438,15 +451,14 @@ object TvAppShortcuts {
             )
           }
         }
-        // 3. App-only custom URI schemes (e.g., vnd.youtube://, nflx://, spotify://)
-        addAll(resolvedSchemes)
-        // 4. Standard LAUNCHER Intent scoped to package (covers sideloaded mobile APKs on TV)
+        resolvedPackages.firstOrNull()?.let { primaryPkg ->
+          add("market://launch?id=$primaryPkg")
+        }
         resolvedPackages.forEach { pkg ->
           add(
             "intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;package=$pkg;end"
           )
         }
-        // 5. Direct custom-scheme or intent link if user explicitly saved one
         if (!isWebFallback && scheme != "market" && link.isNotEmpty()) {
           add(link)
         }

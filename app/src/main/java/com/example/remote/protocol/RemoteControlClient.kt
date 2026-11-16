@@ -456,10 +456,11 @@ class RemoteControlClient(
     errorWaitMs: Long = NATIVE_LAUNCH_ERROR_WAIT_MS,
   ): OttLaunchOutcome = coroutineScope {
     for (candidate in plan.nativeCandidates) {
+      val trimmedCandidate = candidate.trim()
       val errorMonitor =
         async(start = CoroutineStart.UNDISPATCHED) {
           withTimeoutOrNull(errorWaitMs) {
-            appLinkErrors.first { it == candidate }
+            appLinkErrors.first { it.trim() == trimmedCandidate }
           } != null
         }
       val sent = launchApp(candidate)

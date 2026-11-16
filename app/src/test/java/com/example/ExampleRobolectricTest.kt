@@ -294,7 +294,7 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `built-in and custom OTT launch plans try native TV app intents before browser fallback`() {
+  fun `built-in and custom OTT launch plans try native TV app schemes and package launchers before browser fallback`() {
     com.example.remote.data.TvAppShortcuts.all.forEach { shortcut ->
       val plan = com.example.remote.data.TvAppShortcuts.buildLaunchPlan(shortcut)
       assertTrue(
@@ -302,17 +302,32 @@ class ExampleRobolectricTest {
         plan.nativeCandidates.isNotEmpty(),
       )
       assertTrue(
-        "Expected Leanback launcher intent first for ${shortcut.name}",
-        plan.nativeCandidates.first().contains("LEANBACK_LAUNCHER"),
+        "Expected verified scheme or package intent for ${shortcut.name}",
+        plan.nativeCandidates.any { it.contains("LEANBACK_LAUNCHER") } &&
+          plan.nativeCandidates.any { it.startsWith("market://launch?id=${shortcut.packageNames.first()}") },
       )
       assertTrue(
-        "Native candidates must never trigger bare https:// browser links for ${shortcut.name}",
+        "Native candidates must never trigger bare http/https/market-details links for ${shortcut.name}",
         plan.nativeCandidates.none {
-          it.startsWith("http://") || it.startsWith("https://") || it.startsWith("market://")
+          it.startsWith("http://") ||
+            it.startsWith("https://") ||
+            it.startsWith("market://details")
         },
       )
       assertEquals(shortcut.appLink, plan.browserFallback)
     }
+
+    val youtubePlan =
+      com.example.remote.data.TvAppShortcuts.buildLaunchPlan(
+        com.example.remote.data.TvAppShortcuts.all.first { it.id == "youtube" }
+      )
+    assertEquals("vnd.youtube.launch://www.youtube.com", youtubePlan.nativeCandidates.first())
+
+    val hotstarPlan =
+      com.example.remote.data.TvAppShortcuts.buildLaunchPlan(
+        com.example.remote.data.TvAppShortcuts.all.first { it.id == "hotstar" }
+      )
+    assertTrue(hotstarPlan.nativeCandidates.contains("market://launch?id=in.startv.hotstar"))
 
     val customNoBrowserOnlyPkg =
       com.example.remote.data.TvAppShortcut(
@@ -326,6 +341,7 @@ class ExampleRobolectricTest {
       )
     val customPlan = com.example.remote.data.TvAppShortcuts.buildLaunchPlan(customNoBrowserOnlyPkg)
     assertTrue(customPlan.nativeCandidates.any { it.contains("package=org.videolan.vlc") })
+    assertTrue(customPlan.nativeCandidates.contains("market://launch?id=org.videolan.vlc"))
     assertEquals("https://play.google.com/store/apps/details?id=org.videolan.vlc", customPlan.browserFallback)
   }
 
@@ -443,7 +459,7 @@ class ExampleRobolectricTest {
       val installedOutcome = client.launchAppWithPlan(plan, errorWaitMs = 150L)
       assertEquals(com.example.remote.protocol.OttLaunchOutcome.LAUNCHED_NATIVE_APP, installedOutcome)
       assertEquals(1, installedReceivedLinks.size)
-      assertTrue(installedReceivedLinks.first().startsWith("intent:#Intent;"))
+      assertEquals("vnd.youtube.launch://www.youtube.com", installedReceivedLinks.first())
       assertTrue(installedReceivedLinks.none { it.startsWith("https://") })
       assertTrue("Session must stay healthy after native launch", client.isConnectionHealthy())
       client.disconnect()

@@ -35,29 +35,18 @@ jobs:
           PASS="${KEYSTORE_PASSWORD:-TvRemotePermanent2026}"
           ALIAS="${KEY_ALIAS:-tvremote}"
           KEYPASS="${KEY_PASSWORD:-$PASS}"
-
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | tr -d ' \n\r' | base64 -d > my-upload-key.jks 2>/dev/null || true
           fi
-
           if [ -s my-upload-key.jks ] && keytool -list -keystore my-upload-key.jks -storepass "$PASS" >/dev/null 2>&1; then
             echo "✅ Verified permanent keystore from GitHub Secrets."
           else
-            echo "⚠️ No valid permanent keystore found in secrets. Generating a new permanent keystore..."
             rm -f my-upload-key.jks
-            keytool -genkeypair -noprompt \
-              -keystore my-upload-key.jks \
-              -keyalg RSA -keysize 2048 -validity 36500 \
-              -alias "$ALIAS" \
-              -storepass "$PASS" \
-              -keypass "$KEYPASS" \
+            keytool -genkeypair -noprompt -keystore my-upload-key.jks -keyalg RSA -keysize 2048 -validity 36500 \
+              -alias "$ALIAS" -storepass "$PASS" -keypass "$KEYPASS" \
               -dname "CN=SmartTVRemote, OU=Mobile, O=App, L=Hyderabad, S=Telangana, C=IN"
-
-            echo "=================================================================="
-            echo "ACTION REQUIRED: COPY THE SINGLE LINE BELOW INTO 'KEYSTORE_BASE64' SECRET:"
+            echo "COPY THIS SINGLE LINE INTO KEYSTORE_BASE64 SECRET:"
             base64 -w 0 my-upload-key.jks
-            echo ""
-            echo "=================================================================="
           fi
 
       - name: Resolve Version Metadata
@@ -68,49 +57,88 @@ jobs:
             BASE_VER=$(grep -E 'val ciVersionName' -A1 app/build.gradle.kts | grep -oE '"[^"]+"' | tail -n 1 | tr -d '"' || true)
           fi
           BASE_VER=${BASE_VER:-1.0}
-
           DOT_COUNT=$(echo "$BASE_VER" | tr -cd '.' | wc -c)
-          if [ "$DOT_COUNT" -ge 2 ]; then
-            FINAL_VER="$BASE_VER"
-          else
-            FINAL_VER="${BASE_VER}.${{ github.run_number }}"
-          fi
-
+          if [ "$DOT_COUNT" -ge 2 ]; then FINAL_VER="$BASE_VER"; else FINAL_VER="${BASE_VER}.${{ github.run_number }}"; fi
           GRADLE_CODE=$(grep -E '^[[:space:]]*versionCode[[:space:]]*=' app/build.gradle.kts | head -n 1 | grep -oE '[0-9]+' || true)
           GRADLE_CODE=${GRADLE_CODE:-1}
-
-          if [ "$GRADLE_CODE" -gt "${{ github.run_number }}" ]; then
-            FINAL_CODE="$GRADLE_CODE"
-          else
-            FINAL_CODE="${{ github.run_number }}"
-          fi
-
+          if [ "$GRADLE_CODE" -gt "${{ github.run_number }}" ]; then FINAL_CODE="$GRADLE_CODE"; else FINAL_CODE="${{ github.run_number }}"; fi
           echo "version_name=$FINAL_VER" >> $GITHUB_OUTPUT
           echo "version_code=$FINAL_CODE" >> $GITHUB_OUTPUT
-          echo "Resolved release version: v$FINAL_VER (versionCode=$FINAL_CODE)"
+
+      - name: Inject In-App Auto-Update Popup
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - << 'EOF'
+          import os, re, glob
+          repo = os.environ["REPO"]
+          m_path = "app/src/main/AndroidManifest.xml"
+          if os.path.exists(m_path):
+              txt = open(m_path).read()
+              if "android.permission.INTERNET" not in txt:
+                  open(m_path, "w").write(txt.replace("<application", '<uses-permission android:name="android.permission.INTERNET" />\n    <application', 1))
+          files = glob.glob("app/src/main/**/MainActivity.kt", recursive=True) + glob.glob("app/src/main/**/MainActivity.java", recursive=True)
+          if not files: exit(0)
+          tf = files[0]
+          src = open(tf).read()
+          pm = re.search(r'^\s*package\s+([a-zA-Z0-9_.]+)', src, re.M)
+          pkg = pm.group(1) if pm else "com.tvremote.app"
+          code = f'''package {pkg}
+          import android.app.AlertDialog
+          import android.content.*
+          import android.net.Uri
+          import android.os.*
+          import org.json.JSONObject
+          import java.net.*
+          import kotlin.concurrent.thread
+          object AutoAppUpdater {{
+              private const val URL_STR = "https://github.com{repo}/releases/latest/download/update-manifest.json"
+              private var done = false
+              @JvmStatic fun checkForUpdate(ctx: Context) {{
+                  if (done) return; done = true
+                  thread {{
+                      try {{
+                          val c = (URL(URL_STR).openConnection() as HttpURLConnection).apply {{ connectTimeout = 5000; readTimeout = 5000 }}
+                          val j = JSONObject(c.inputStream.bufferedReader().readText())
+                          val lc = j.getInt("versionCode"); val ln = j.getString("versionName")
+                          val notes = j.optString("notes", "New update available."); val apk = j.getString("apkUrl")
+                          val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+                          val cc = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode.toInt() else @Suppress("DEPRECATION") pi.versionCode
+                          if (lc > cc) Handler(Looper.getMainLooper()).post {{
+                              try {{
+                                  AlertDialog.Builder(ctx).setTitle("Update Available (v$ln)")
+                                      .setMessage("What's New:\\n$notes\\n\\nTap Update Now to install.")
+                                      .setPositiveButton("Update Now") {{ _, _ -> ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(apk))) }}
+                                      .setNegativeButton("Later", null).show()
+                              }} catch (_: Exception) {{}}
+                          }}
+                      }} catch (_: Exception) {{}}
+                  }}
+              }}
+          }}'''
+          open(os.path.join(os.path.dirname(tf), "AutoAppUpdater.kt"), "w").write("\n".join(l[10:] if l.startswith("          ") else l for l in code.splitlines()))
+          if "AutoAppUpdater.checkForUpdate" not in src:
+              rep = r'\1\n        AutoAppUpdater.checkForUpdate(this)' if tf.endswith(".kt") else r'\1\n        AutoAppUpdater.checkForUpdate(this);'
+              s2, n = re.subn(r'(super\.onCreate\([^\)]*\);?)', rep, src, count=1)
+              if n > 0: open(tf, "w").write(s2); print("✅ Injected AutoAppUpdater into", tf)
+          EOF
 
       - name: Build Unsigned Release APK
         run: |
           sed -i 's/signingConfig = signingConfigs.getByName("release")//g' app/build.gradle.kts || true
           sed -i 's/signingConfig signingConfigs.release//g' app/build.gradle.kts || true
           sed -i 's/signingConfig signingConfigs.getByName("release")//g' app/build.gradle.kts || true
-
-          # Groovy init script dynamically sets versionCode and versionName without classpath issues
           cat << 'EOF' > ci-version.init.gradle
           allprojects {
               plugins.withId("com.android.application") {
-                  android {
-                      defaultConfig {
-                          versionCode = project.property("APP_VERSION_CODE").toString().toInteger()
-                          versionName = project.property("APP_VERSION_NAME").toString()
-                      }
-                  }
+                  android { defaultConfig {
+                      versionCode = project.property("APP_VERSION_CODE").toString().toInteger()
+                      versionName = project.property("APP_VERSION_NAME").toString()
+                  } }
               }
           }
           EOF
-
-          gradle assembleRelease \
-            --init-script ci-version.init.gradle \
+          gradle assembleRelease --init-script ci-version.init.gradle \
             -PAPP_VERSION_CODE=${{ steps.meta.outputs.version_code }} \
             -PAPP_VERSION_NAME=${{ steps.meta.outputs.version_name }} \
             -PRELEASE_REPO=${{ github.repository }}
@@ -124,45 +152,21 @@ jobs:
           PASS="${KEYSTORE_PASSWORD:-TvRemotePermanent2026}"
           ALIAS="${KEY_ALIAS:-tvremote}"
           KEYPASS="${KEY_PASSWORD:-$PASS}"
-
           DETECTED_ALIAS=$(keytool -list -keystore my-upload-key.jks -storepass "$PASS" | grep "PrivateKeyEntry" | cut -d',' -f1 | head -n 1)
           FINAL_ALIAS="${DETECTED_ALIAS:-$ALIAS}"
-
           BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -maxdepth 1 | sort -V | tail -n 1)
           UNSIGNED_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
           VER_NAME="${{ steps.meta.outputs.version_name }}"
           VER_CODE="${{ steps.meta.outputs.version_code }}"
           APK_FILE="YV-TV-Remote-v${VER_NAME}.apk"
-
           $BUILD_TOOLS/zipalign -v -p 4 "$UNSIGNED_APK" aligned.apk
-          $BUILD_TOOLS/apksigner sign \
-            --ks my-upload-key.jks \
-            --ks-pass pass:"$PASS" \
-            --ks-key-alias "$FINAL_ALIAS" \
-            --key-pass pass:"$KEYPASS" \
-            --out "$APK_FILE" \
-            aligned.apk
-
-          echo "=== APK Signature & Certificate Verification ==="
-          $BUILD_TOOLS/apksigner verify --verbose --print-certs "$APK_FILE"
-
-          echo "=== APK Version Metadata Verification ==="
-          $BUILD_TOOLS/aapt dump badging "$APK_FILE" | grep -E "package:|sdkVersion:|targetSdkVersion:" || true
-
+          $BUILD_TOOLS/apksigner sign --ks my-upload-key.jks --ks-pass pass:"$PASS" --ks-key-alias "$FINAL_ALIAS" --key-pass pass:"$KEYPASS" --out "$APK_FILE" aligned.apk
+          $BUILD_TOOLS/apksigner verify --verbose "$APK_FILE"
           RELEASE_NOTES=$(git log -1 --pretty=%s || echo "Automated release build")
           VER_CODE="$VER_CODE" VER_NAME="$VER_NAME" APK_FILE="$APK_FILE" REPO="${{ github.repository }}" RELEASE_NOTES="$RELEASE_NOTES" python3 -c '
           import json, os
-          manifest = {
-            "versionCode": int(os.environ["VER_CODE"]),
-            "versionName": os.environ["VER_NAME"],
-            "tag": "v" + os.environ["VER_NAME"],
-            "title": "YV TV Remote v" + os.environ["VER_NAME"],
-            "notes": os.environ["RELEASE_NOTES"] or ("Automated signed release build #" + os.environ["VER_CODE"]),
-            "apkUrl": "https://github.com" + os.environ["REPO"] + "/releases/download/v" + os.environ["VER_NAME"] + "/" + os.environ["APK_FILE"],
-            "releaseUrl": "https://github.com" + os.environ["REPO"] + "/releases/tag/v" + os.environ["VER_NAME"]
-          }
-          with open("update-manifest.json", "w") as f:
-            json.dump(manifest, f, indent=2)
+          m = {"versionCode": int(os.environ["VER_CODE"]), "versionName": os.environ["VER_NAME"], "tag": "v" + os.environ["VER_NAME"], "title": "YV TV Remote v" + os.environ["VER_NAME"], "notes": os.environ["RELEASE_NOTES"], "apkUrl": "https://github.com" + os.environ["REPO"] + "/releases/download/v" + os.environ["VER_NAME"] + "/" + os.environ["APK_FILE"], "releaseUrl": "https://github.com" + os.environ["REPO"] + "/releases/tag/v" + os.environ["VER_NAME"]}
+          open("update-manifest.json", "w").write(json.dumps(m, indent=2))
           '
 
       - name: Publish APK & Update Manifest to GitHub Releases

@@ -30,6 +30,7 @@ import android.content.*
 import android.net.Uri
 import android.os.*
 import android.provider.Settings
+import android.widget.Toast
 import androidx.core.content.FileProvider
 import org.json.JSONObject
 import java.io.File
@@ -37,38 +38,49 @@ import java.net.*
 import kotlin.concurrent.thread
 
 object AutoAppUpdater {{
-    private const val URL_STR = "https://github.com{repo}/releases/latest/download/update-manifest.json"
+    private const val API_URL = "https://github.com{repo}/releases/latest"
     private var done = false
 
     @JvmStatic fun checkForUpdate(ctx: Context) {{
         if (done) return; done = true
         thread {{
             try {{
-                val c = (URL(URL_STR).openConnection() as HttpURLConnection).apply {{
+                val c = (URL(API_URL).openConnection() as HttpURLConnection).apply {{
                     connectTimeout = 8000
                     readTimeout = 8000
-                    instanceFollowRedirects = true
-                    setRequestProperty("User-Agent", "AndroidAppUpdater")
+                    setRequestProperty("Accept", "application/vnd.github+json")
+                    setRequestProperty("User-Agent", "YV-TV-Remote-Updater")
                 }}
                 val j = JSONObject(c.inputStream.bufferedReader().readText())
-                val lc = j.getInt("versionCode")
-                val ln = j.getString("versionName")
-                val notes = j.optString("notes", "New update available.")
-                val apk = j.getString("apkUrl")
+                val tag = j.getString("tag_name").removePrefix("v")
+                val notes = j.optString("body", "New update available.")
+                val assets = j.getJSONArray("assets")
+                var apkUrl = ""
+                for (i in 0 until assets.length()) {{
+                    val a = assets.getJSONObject(i)
+                    if (a.getString("name").endsWith(".apk")) {{
+                        apkUrl = a.getString("browser_download_url")
+                        break
+                    }}
+                }}
+                val latestCode = tag.split(".").lastOrNull()?.toIntOrNull() ?: 0
                 val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
-                val cc = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode.toInt() else @Suppress("DEPRECATION") pi.versionCode
-                if (lc > cc) {{
+                val currentCode = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode.toInt() else @Suppress("DEPRECATION") pi.versionCode
+
+                if (latestCode > currentCode && apkUrl.isNotEmpty()) {{
                     Handler(Looper.getMainLooper()).postDelayed({{
                         try {{
                             AlertDialog.Builder(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                                .setTitle("Update Available (v$ln)")
-                                .setMessage("What's New:\\n$notes\\n\\nTap Update Now to install directly.")
-                                .setPositiveButton("Update Now") {{ _, _ -> startInAppUpdate(ctx, apk) }}
+                                .setTitle("Update Available (v$tag)")
+                                .setMessage("$notes\\n\\nTap Update Now to download and install inside the app.")
+                                .setPositiveButton("Update Now") {{ _, _ -> startInAppUpdate(ctx, apkUrl) }}
                                 .setNegativeButton("Later", null)
                                 .setCancelable(true)
                                 .show()
-                        }} catch (_: Exception) {{}}
-                    }}, 1200L)
+                        }} catch (e: Exception) {{
+                            Toast.makeText(ctx, "Update v$tag available! Dialog err: ${{e.message}}", Toast.LENGTH_LONG).show()
+                        }}
+                    }}, 1500L)
                 }}
             }} catch (_: Exception) {{}}
         }}
@@ -97,11 +109,22 @@ object AutoAppUpdater {{
         }}
         thread {{
             try {{
-                val conn = (URL(apkUrl).openConnection() as HttpURLConnection).apply {{
-                    instanceFollowRedirects = true
+                var finalUrl = apkUrl
+                var conn = (URL(finalUrl).openConnection() as HttpURLConnection).apply {{
+                    instanceFollowRedirects = false
                     connectTimeout = 15000
                     readTimeout = 30000
-                    setRequestProperty("User-Agent", "AndroidAppUpdater")
+                    setRequestProperty("User-Agent", "YV-TV-Remote-Updater")
+                }}
+                while (conn.responseCode in 301..308) {{
+                    finalUrl = conn.getHeaderField("Location")
+                    conn.disconnect()
+                    conn = (URL(finalUrl).openConnection() as HttpURLConnection).apply {{
+                        instanceFollowRedirects = false
+                        connectTimeout = 15000
+                        readTimeout = 30000
+                        setRequestProperty("User-Agent", "YV-TV-Remote-Updater")
+                    }}
                 }}
                 val total = conn.contentLength
                 val outFile = File(ctx.cacheDir, "app-update.apk")

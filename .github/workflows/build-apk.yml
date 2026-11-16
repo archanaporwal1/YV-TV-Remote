@@ -95,14 +95,14 @@ jobs:
           sed -i 's/signingConfig signingConfigs.release//g' app/build.gradle.kts || true
           sed -i 's/signingConfig signingConfigs.getByName("release")//g' app/build.gradle.kts || true
 
-          # Create a Gradle init script to safely force versionCode and versionName without breaking build.gradle.kts
-          cat << 'EOF' > ci-version.init.gradle.kts
+          # Groovy init script dynamically sets versionCode and versionName without classpath issues
+          cat << 'EOF' > ci-version.init.gradle
           allprojects {
               plugins.withId("com.android.application") {
-                  extensions.configure<com.android.build.api.dsl.ApplicationExtension> {
+                  android {
                       defaultConfig {
-                          versionCode = (project.findProperty("APP_VERSION_CODE") as String).toInt()
-                          versionName = project.findProperty("APP_VERSION_NAME") as String
+                          versionCode = project.property("APP_VERSION_CODE").toString().toInteger()
+                          versionName = project.property("APP_VERSION_NAME").toString()
                       }
                   }
               }
@@ -110,7 +110,7 @@ jobs:
           EOF
 
           gradle assembleRelease \
-            --init-script ci-version.init.gradle.kts \
+            --init-script ci-version.init.gradle \
             -PAPP_VERSION_CODE=${{ steps.meta.outputs.version_code }} \
             -PAPP_VERSION_NAME=${{ steps.meta.outputs.version_name }} \
             -PRELEASE_REPO=${{ github.repository }}

@@ -51,6 +51,7 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
     data object Connecting : SessionEvent()
     data object Connected : SessionEvent()
     data class PairingRequired(val reason: String) : SessionEvent()
+    data class ConnectionLost(val message: String) : SessionEvent()
     data class Error(val message: String) : SessionEvent()
   }
 
@@ -66,8 +67,16 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
   private var socket: SSLSocket? = null
   private var outputStream: OutputStream? = null
 
+  fun isConnectionHealthy(): Boolean {
+    val sock = socket ?: return false
+    return !sock.isClosed &&
+      sock.isConnected &&
+      outputStream != null &&
+      _sessionEvent.value is SessionEvent.Connected
+  }
+
   suspend fun connect(host: String, port: Int = DEFAULT_REMOTE_PORT) {
-    disconnect()
+    teardownSessionOnly()
     _sessionEvent.value = SessionEvent.Connecting
     _imeState.value = TvImeState()
 
@@ -99,9 +108,11 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
               "TV requires pairing before remote control access (${e.message ?: "TLS rejected"})."
             )
           false
-        } catch (e: Exception) {
+        } catch (e: kotlinx.coroutines.CancellationException) {
+          throw e
+        } catch (t: Throwable) {
           _sessionEvent.value =
-            SessionEvent.Error(e.message ?: "Unable to connect to $host:$port.")
+            SessionEvent.Error(t.message ?: "Unable to connect to $host:$port.")
           false
         }
       }
@@ -194,7 +205,8 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
           _sessionEvent.value == SessionEvent.Connected ||
           _sessionEvent.value == SessionEvent.Connecting
         ) {
-          _sessionEvent.value = SessionEvent.Disconnected
+          _sessionEvent.value =
+            SessionEvent.ConnectionLost("TV connection closed while idle or switching apps.")
         }
       }
     } catch (e: SSLException) {
@@ -205,12 +217,14 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
               "Certificate not trusted by TV (${e.message ?: "SSLException"}). Starting pairing..."
             )
         } else {
-          _sessionEvent.value = SessionEvent.Error(e.message ?: "TLS connection to TV was lost.")
+          _sessionEvent.value =
+            SessionEvent.ConnectionLost(e.message ?: "TLS connection to TV was interrupted.")
         }
       }
     } catch (e: Exception) {
       if (scope?.isActive == true) {
-        _sessionEvent.value = SessionEvent.Error(e.message ?: "Connection to TV was lost.")
+        _sessionEvent.value =
+          SessionEvent.ConnectionLost(e.message ?: "Connection to TV was interrupted.")
       }
     } finally {
       cleanupSocketOnly()
@@ -218,10 +232,12 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
   }
 
   private suspend fun sendConfigureAndActive() {
+    val modelName = Build.MODEL.orEmpty().ifBlank { "Android" }
+    val vendorName = Build.MANUFACTURER.orEmpty().ifBlank { "Android" }
     val deviceInfo =
       RemoteDeviceInfo.newBuilder()
-        .setModel(Build.MODEL.ifBlank { "Android" })
-        .setVendor(Build.MANUFACTURER.ifBlank { "Android" })
+        .setModel(modelName)
+        .setVendor(vendorName)
         .setUnknown1(1)
         .setUnknown2("1")
         .setPackageName("com.example.yvtvremote")
@@ -330,7 +346,15 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
   private suspend fun sendRemoteMessage(message: RemoteMessage): Boolean =
     withContext(Dispatchers.IO) {
       writeMutex.withLock {
-        val out = outputStream ?: return@withLock false
+        val sock = socket
+        val out = outputStream
+        if (out == null || sock == null || sock.isClosed || !sock.isConnected) {
+          if (_sessionEvent.value is SessionEvent.Connected) {
+            _sessionEvent.value = SessionEvent.ConnectionLost("Remote socket disconnected.")
+          }
+          cleanupSocketOnly()
+          return@withLock false
+        }
         try {
           DelimitedStreamHelper.writeMessage(out, message)
           true
@@ -341,24 +365,29 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
                 "Certificate rejected by TV (${e.message ?: "SSLException"}). Starting pairing..."
               )
             } else {
-              SessionEvent.Error(e.message ?: "Failed to send command to TV.")
+              SessionEvent.ConnectionLost(e.message ?: "TLS session interrupted.")
             }
           cleanupSocketOnly()
           false
         } catch (e: IOException) {
-          _sessionEvent.value = SessionEvent.Error(e.message ?: "Failed to send command to TV.")
+          _sessionEvent.value =
+            SessionEvent.ConnectionLost(e.message ?: "Failed to send command to TV.")
           cleanupSocketOnly()
           false
         }
       }
     }
 
-  fun disconnect() {
+  private fun teardownSessionOnly() {
     readerJob?.cancel()
     readerJob = null
     scope?.cancel()
     scope = null
     cleanupSocketOnly()
+  }
+
+  fun disconnect() {
+    teardownSessionOnly()
     _imeState.value = TvImeState()
     _sessionEvent.value = SessionEvent.Disconnected
   }

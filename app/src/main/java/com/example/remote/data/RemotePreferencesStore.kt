@@ -2,6 +2,10 @@ package com.example.remote.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import com.example.ui.theme.AppThemeMode
+import com.example.ui.theme.RemoteAccentTheme
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -28,7 +32,71 @@ data class AppSettings(
   val soundEnabled: Boolean = true,
   val soundVolume: Float = 0.7f,
   val autoReconnectEnabled: Boolean = true,
+  val autoCheckUpdates: Boolean = true,
+  val releaseRepoOverride: String = "",
 )
+
+enum class PreferredPadMode(val storageKey: String) {
+  DPAD("DPAD"),
+  TOUCHPAD("TOUCHPAD");
+
+  companion object {
+    fun fromKey(key: String?): PreferredPadMode =
+      entries.firstOrNull { it.storageKey.equals(key, ignoreCase = true) } ?: DPAD
+  }
+}
+
+enum class UiLayoutPreset(val label: String) {
+  FULL("Full Remote"),
+  MINIMAL("Minimalist"),
+  STREAMING("Media + OTT"),
+}
+
+data class RemoteUiPreferences(
+  val defaultPadMode: PreferredPadMode = PreferredPadMode.DPAD,
+  val themeMode: AppThemeMode = AppThemeMode.SYSTEM,
+  val accentTheme: RemoteAccentTheme = RemoteAccentTheme.ELECTRIC_CYAN,
+  val compactMode: Boolean = false,
+  val showQuickSearchBar: Boolean = true,
+  val showNavigationRow: Boolean = true,
+  val showVolumeAndChannel: Boolean = true,
+  val showMediaTransport: Boolean = true,
+  val showStreamingShortcuts: Boolean = true,
+  val shortcutColumns: Int = 3,
+  val enabledShortcutIds: Set<String> = TvAppShortcuts.defaultEnabledIds,
+  val customShortcuts: List<TvAppShortcut> = emptyList(),
+) {
+  fun allAvailableShortcuts(): List<TvAppShortcut> = TvAppShortcuts.all + customShortcuts
+
+  fun enabledShortcuts(): List<TvAppShortcut> =
+    allAvailableShortcuts().filter { it.id in enabledShortcutIds }
+
+  fun matchingPresetOrNull(): UiLayoutPreset? =
+    when {
+      !compactMode &&
+        showQuickSearchBar &&
+        showNavigationRow &&
+        showVolumeAndChannel &&
+        showMediaTransport &&
+        showStreamingShortcuts -> UiLayoutPreset.FULL
+
+      compactMode &&
+        !showQuickSearchBar &&
+        showNavigationRow &&
+        showVolumeAndChannel &&
+        !showMediaTransport &&
+        !showStreamingShortcuts -> UiLayoutPreset.MINIMAL
+
+      compactMode &&
+        showQuickSearchBar &&
+        showNavigationRow &&
+        showVolumeAndChannel &&
+        showMediaTransport &&
+        showStreamingShortcuts -> UiLayoutPreset.STREAMING
+
+      else -> null
+    }
+}
 
 class RemotePreferencesStore(context: Context) {
 
@@ -192,6 +260,8 @@ class RemotePreferencesStore(context: Context) {
       soundEnabled = prefs.getBoolean(KEY_SOUND_ENABLED, true),
       soundVolume = prefs.getFloat(KEY_SOUND_VOLUME, 0.7f).coerceIn(0f, 1f),
       autoReconnectEnabled = prefs.getBoolean(KEY_AUTO_RECONNECT, true),
+      autoCheckUpdates = prefs.getBoolean(KEY_AUTO_CHECK_UPDATES, true),
+      releaseRepoOverride = prefs.getString(KEY_RELEASE_REPO_OVERRIDE, "").orEmpty(),
     )
   }
 
@@ -201,7 +271,126 @@ class RemotePreferencesStore(context: Context) {
       .putBoolean(KEY_SOUND_ENABLED, settings.soundEnabled)
       .putFloat(KEY_SOUND_VOLUME, settings.soundVolume.coerceIn(0f, 1f))
       .putBoolean(KEY_AUTO_RECONNECT, settings.autoReconnectEnabled)
+      .putBoolean(KEY_AUTO_CHECK_UPDATES, settings.autoCheckUpdates)
+      .putString(KEY_RELEASE_REPO_OVERRIDE, settings.releaseRepoOverride.trim())
       .apply()
+  }
+
+  fun getSkippedUpdateTag(): String = prefs.getString(KEY_SKIPPED_UPDATE_TAG, "").orEmpty()
+
+  fun setSkippedUpdateTag(tag: String) {
+    prefs.edit().putString(KEY_SKIPPED_UPDATE_TAG, tag).apply()
+  }
+
+  fun getLastNotifiedUpdateTag(): String = prefs.getString(KEY_LAST_NOTIFIED_UPDATE_TAG, "").orEmpty()
+
+  fun setLastNotifiedUpdateTag(tag: String) {
+    prefs.edit().putString(KEY_LAST_NOTIFIED_UPDATE_TAG, tag).apply()
+  }
+
+  fun loadUiPreferences(): RemoteUiPreferences {
+    val raw = prefs.getString(KEY_UI_PREFERENCES_JSON, null)
+    if (raw.isNullOrBlank()) return RemoteUiPreferences()
+    return try {
+      val obj = JSONObject(raw)
+      val builtInIds = TvAppShortcuts.all.map { it.id }.toSet()
+      val customShortcuts =
+        if (obj.has("customShortcuts")) {
+          val arr = obj.getJSONArray("customShortcuts")
+          buildList {
+            for (i in 0 until arr.length()) {
+              val item = arr.optJSONObject(i) ?: continue
+              val id = item.optString("id").trim()
+              val name = item.optString("name").trim()
+              val appLink = item.optString("appLink").trim()
+              if (id.isNotEmpty() && id !in builtInIds && name.isNotEmpty() && appLink.isNotEmpty()) {
+                val badge =
+                  item.optString("badge").trim().ifEmpty { TvAppShortcuts.suggestBadge(name) }.take(3)
+                val colorArgb = item.optLong("accentColorArgb", 0xFF00B4D8L).toInt()
+                val iconStyle = CustomOttIconStyle.fromKey(item.optString("iconStyle", "badge"))
+                add(
+                  TvAppShortcut(
+                    id = id,
+                    name = name,
+                    badge = badge,
+                    appLink = appLink,
+                    accentColor = Color(colorArgb),
+                    isCustom = true,
+                    iconStyle = iconStyle,
+                  )
+                )
+              }
+            }
+          }
+        } else {
+          emptyList()
+        }
+      val allValidIds = builtInIds + customShortcuts.map { it.id }.toSet()
+      val enabledIds =
+        if (obj.has("enabledShortcutIds")) {
+          val arr = obj.getJSONArray("enabledShortcutIds")
+          buildSet {
+            for (i in 0 until arr.length()) {
+              val id = arr.optString(i).trim()
+              if (id.isNotEmpty() && id in allValidIds) {
+                add(id)
+              }
+            }
+          }
+        } else {
+          allValidIds
+        }
+      RemoteUiPreferences(
+        defaultPadMode = PreferredPadMode.fromKey(obj.optString("defaultPadMode", "DPAD")),
+        themeMode = AppThemeMode.fromKey(obj.optString("themeMode", "system")),
+        accentTheme = RemoteAccentTheme.fromKey(obj.optString("accentTheme", "cyan")),
+        compactMode = obj.optBoolean("compactMode", false),
+        showQuickSearchBar = obj.optBoolean("showQuickSearchBar", true),
+        showNavigationRow = obj.optBoolean("showNavigationRow", true),
+        showVolumeAndChannel = obj.optBoolean("showVolumeAndChannel", true),
+        showMediaTransport = obj.optBoolean("showMediaTransport", true),
+        showStreamingShortcuts = obj.optBoolean("showStreamingShortcuts", true),
+        shortcutColumns = obj.optInt("shortcutColumns", 3).coerceIn(2, 4),
+        enabledShortcutIds = enabledIds,
+        customShortcuts = customShortcuts,
+      )
+    } catch (_: Exception) {
+      RemoteUiPreferences()
+    }
+  }
+
+  fun saveUiPreferences(uiPrefs: RemoteUiPreferences) {
+    val obj =
+      JSONObject().apply {
+        put("defaultPadMode", uiPrefs.defaultPadMode.storageKey)
+        put("themeMode", uiPrefs.themeMode.storageKey)
+        put("accentTheme", uiPrefs.accentTheme.storageKey)
+        put("compactMode", uiPrefs.compactMode)
+        put("showQuickSearchBar", uiPrefs.showQuickSearchBar)
+        put("showNavigationRow", uiPrefs.showNavigationRow)
+        put("showVolumeAndChannel", uiPrefs.showVolumeAndChannel)
+        put("showMediaTransport", uiPrefs.showMediaTransport)
+        put("showStreamingShortcuts", uiPrefs.showStreamingShortcuts)
+        put("shortcutColumns", uiPrefs.shortcutColumns.coerceIn(2, 4))
+        val idsArray = JSONArray()
+        uiPrefs.enabledShortcutIds.forEach { idsArray.put(it) }
+        put("enabledShortcutIds", idsArray)
+        val customArray = JSONArray()
+        uiPrefs.customShortcuts.forEach { shortcut ->
+          customArray.put(
+            JSONObject().apply {
+              put("id", shortcut.id)
+              put("name", shortcut.name)
+              put("badge", shortcut.badge)
+              put("appLink", shortcut.appLink)
+              put("accentColorArgb", shortcut.accentColor.toArgb().toLong())
+              put("iconStyle", shortcut.iconStyle.key)
+            }
+          )
+        }
+        put("customShortcuts", customArray)
+      }
+    prefs.edit().putString(KEY_UI_PREFERENCES_JSON, obj.toString()).apply()
   }
 
   companion object {
@@ -214,6 +403,11 @@ class RemotePreferencesStore(context: Context) {
     private const val KEY_SOUND_ENABLED = "settings_sound_enabled"
     private const val KEY_SOUND_VOLUME = "settings_sound_volume"
     private const val KEY_AUTO_RECONNECT = "settings_auto_reconnect"
+    private const val KEY_AUTO_CHECK_UPDATES = "settings_auto_check_updates"
+    private const val KEY_RELEASE_REPO_OVERRIDE = "settings_release_repo_override"
+    private const val KEY_SKIPPED_UPDATE_TAG = "skipped_update_tag"
+    private const val KEY_LAST_NOTIFIED_UPDATE_TAG = "last_notified_update_tag"
+    private const val KEY_UI_PREFERENCES_JSON = "ui_preferences_json"
     const val DEFAULT_PROFILE_ID = "profile_living_room"
   }
 }

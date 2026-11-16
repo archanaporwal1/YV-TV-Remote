@@ -155,4 +155,14 @@ class RemoteProtocolUnitTest {
       )
     )
   }
+
+  @Test
+  fun updateVersionComparison() {
+    val mgr = com.example.remote.update.AppUpdateManager
+    org.junit.Assert.assertTrue(mgr.isNewerVersion("1.0.5", 5, "1.0", 1))
+    org.junit.Assert.assertTrue(mgr.isNewerVersion("v1.1.0", 1, "1.0.99", 99))
+    org.junit.Assert.assertTrue(mgr.isNewerVersion("1.0.5", 6, "1.0.5", 5))
+    org.junit.Assert.assertFalse(mgr.isNewerVersion("1.0.5", 5, "1.0.5", 5))
+    org.junit.Assert.assertFalse(mgr.isNewerVersion("1.0.4", 4, "1.0.5", 5))
+  }
 }

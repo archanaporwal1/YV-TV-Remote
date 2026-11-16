@@ -64,12 +64,40 @@ jobs:
             echo "=================================================================="
           fi
 
+      - name: Resolve Version Metadata
+        id: meta
+        run: |
+          BASE_VER=$(grep -E '^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          if [ -z "$BASE_VER" ]; then
+            BASE_VER=$(grep -E 'val ciVersionName' -A1 app/build.gradle.kts | grep -oE '"[^"]+"' | tail -n 1 | tr -d '"' || true)
+          fi
+          BASE_VER=${BASE_VER:-1.0}
+          DOT_COUNT=$(echo "$BASE_VER" | tr -cd '.' | wc -c)
+          if [ "$DOT_COUNT" -ge 2 ]; then
+            FINAL_VER="$BASE_VER"
+          else
+            FINAL_VER="${BASE_VER}.${{ github.run_number }}"
+          fi
+          GRADLE_CODE=$(grep -E '^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*[0-9]+' app/build.gradle.kts | head -n 1 | grep -oE '[0-9]+' || true)
+          GRADLE_CODE=${GRADLE_CODE:-1}
+          if [ "$GRADLE_CODE" -gt "${{ github.run_number }}" ]; then
+            FINAL_CODE="$GRADLE_CODE"
+          else
+            FINAL_CODE="${{ github.run_number }}"
+          fi
+          echo "version_name=$FINAL_VER" >> $GITHUB_OUTPUT
+          echo "version_code=$FINAL_CODE" >> $GITHUB_OUTPUT
+          echo "Resolved release version: v$FINAL_VER (code $FINAL_CODE)"
+
       - name: Build Unsigned Release APK
         run: |
           sed -i 's/signingConfig = signingConfigs.getByName("release")//g' app/build.gradle.kts || true
           sed -i 's/signingConfig signingConfigs.release//g' app/build.gradle.kts || true
           sed -i 's/signingConfig signingConfigs.getByName("release")//g' app/build.gradle.kts || true
-          gradle assembleRelease
+          gradle assembleRelease \
+            -PAPP_VERSION_CODE=${{ steps.meta.outputs.version_code }} \
+            -PAPP_VERSION_NAME=${{ steps.meta.outputs.version_name }} \
+            -PRELEASE_REPO=${{ github.repository }}
 
       - name: Zipalign & Sign Release APK
         env:
@@ -86,6 +114,9 @@ jobs:
 
           BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -maxdepth 1 | sort -V | tail -n 1)
           UNSIGNED_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          VER_NAME="${{ steps.meta.outputs.version_name }}"
+          VER_CODE="${{ steps.meta.outputs.version_code }}"
+          APK_FILE="YV-TV-Remote-v${VER_NAME}.apk"
 
           $BUILD_TOOLS/zipalign -v -p 4 "$UNSIGNED_APK" aligned.apk
           $BUILD_TOOLS/apksigner sign \
@@ -93,15 +124,33 @@ jobs:
             --ks-pass pass:"$PASS" \
             --ks-key-alias "$FINAL_ALIAS" \
             --key-pass pass:"$KEYPASS" \
-            --out YV-TV-Remote-v${{ github.run_number }}.apk \
+            --out "$APK_FILE" \
             aligned.apk
 
-          $BUILD_TOOLS/apksigner verify --verbose YV-TV-Remote-v${{ github.run_number }}.apk
+          $BUILD_TOOLS/apksigner verify --verbose "$APK_FILE"
 
-      - name: Publish APK to GitHub Releases
+          RELEASE_NOTES=$(git log -1 --pretty=%s || echo "Automated release build")
+          VER_CODE="$VER_CODE" VER_NAME="$VER_NAME" APK_FILE="$APK_FILE" REPO="${{ github.repository }}" RELEASE_NOTES="$RELEASE_NOTES" python3 -c '
+          import json, os
+          manifest = {
+            "versionCode": int(os.environ["VER_CODE"]),
+            "versionName": os.environ["VER_NAME"],
+            "tag": "v" + os.environ["VER_NAME"],
+            "title": "YV TV Remote v" + os.environ["VER_NAME"],
+            "notes": os.environ["RELEASE_NOTES"] or ("Automated signed release build #" + os.environ["VER_CODE"]),
+            "apkUrl": "https://github.com/" + os.environ["REPO"] + "/releases/download/v" + os.environ["VER_NAME"] + "/" + os.environ["APK_FILE"],
+            "releaseUrl": "https://github.com/" + os.environ["REPO"] + "/releases/tag/v" + os.environ["VER_NAME"]
+          }
+          with open("update-manifest.json", "w") as f:
+            json.dump(manifest, f, indent=2)
+          '
+
+      - name: Publish APK & Update Manifest to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: YV TV Remote v1.0.${{ github.run_number }}
-          body: "Automated signed release build #${{ github.run_number }}"
-          files: YV-TV-Remote-v${{ github.run_number }}.apk
+          tag_name: v${{ steps.meta.outputs.version_name }}
+          name: YV TV Remote v${{ steps.meta.outputs.version_name }}
+          body: "Automated signed release v${{ steps.meta.outputs.version_name }} (Build #${{ steps.meta.outputs.version_code }})"
+          files: |
+            YV-TV-Remote-v${{ steps.meta.outputs.version_name }}.apk
+            update-manifest.json

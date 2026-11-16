@@ -33,19 +33,25 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.BookmarkAdd
+import androidx.compose.material.icons.rounded.BrightnessAuto
 import androidx.compose.material.icons.rounded.CastConnected
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SettingsRemote
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material.icons.rounded.Vibration
 import androidx.compose.material.icons.rounded.WifiFind
@@ -62,6 +68,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
@@ -90,11 +97,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.BuildConfig
 import com.example.R
 import com.example.remote.data.SavedTvConnection
 import com.example.remote.data.UserProfile
 import com.example.remote.discovery.DiscoveredTv
-import com.example.ui.theme.EmeraldLive
+import com.example.remote.update.AppUpdateManager
+import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.JetBrainsMonoFamily
 import kotlin.math.roundToInt
 
@@ -115,6 +124,8 @@ fun ConnectionHubView(
   onDeleteSavedTv: (SavedTvConnection) -> Unit,
   onConnectDiscoveredTv: (DiscoveredTv) -> Unit,
   onSaveDiscoveredTv: (DiscoveredTv) -> Unit,
+  onDownloadUpdate: () -> Unit,
+  onOpenUpdateDetails: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
   val activeProfileTvs =
@@ -131,7 +142,7 @@ fun ConnectionHubView(
     contentAlignment = Alignment.TopCenter,
   ) {
     LazyColumn(
-      modifier = Modifier.widthIn(max = 680.dp).fillMaxSize(),
+      modifier = Modifier.widthIn(max = 680.dp).fillMaxSize().testTag("hub_list"),
       contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
       verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
@@ -233,6 +244,16 @@ fun ConnectionHubView(
             }
           },
         )
+      }
+
+      uiState.availableUpdate?.let { release ->
+        item {
+          UpdateAvailableBannerCard(
+            release = release,
+            onDownloadClick = onDownloadUpdate,
+            onDetailsClick = onOpenUpdateDetails,
+          )
+        }
       }
 
       // User Profiles Bar
@@ -854,7 +875,7 @@ private fun ConnectionStatusHeroCard(
                 Text(
                   text = "TLS Connected • ${status.ipAddress}:${status.port}",
                   style = MaterialTheme.typography.labelSmall,
-                  color = EmeraldLive,
+                  color = MaterialTheme.colorScheme.tertiary,
                 )
               }
             }
@@ -1133,11 +1154,17 @@ private fun DiscoveredTvCard(
 fun SettingsModalSheet(
   uiState: RemoteUiState,
   onDismiss: () -> Unit,
+  onOpenCustomizeUi: () -> Unit,
+  onSelectThemeMode: (AppThemeMode) -> Unit,
   onToggleHaptics: (Boolean) -> Unit,
   onToggleSound: (Boolean) -> Unit,
   onChangeSoundVolume: (Float) -> Unit,
   onTestFeedback: () -> Unit,
   onToggleAutoReconnect: (Boolean) -> Unit,
+  onToggleAutoCheckUpdates: (Boolean) -> Unit,
+  onChangeReleaseRepo: (String) -> Unit,
+  onCheckUpdatesNow: () -> Unit,
+  onOpenAvailableUpdate: () -> Unit,
   onSelectProfile: (String) -> Unit,
   onCreateProfileClick: () -> Unit,
   onRenameProfileClick: (UserProfile) -> Unit,
@@ -1153,15 +1180,154 @@ fun SettingsModalSheet(
     contentColor = MaterialTheme.colorScheme.onSurface,
   ) {
     LazyColumn(
-      modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+      modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp).testTag("settings_list"),
       verticalArrangement = Arrangement.spacedBy(14.dp),
       contentPadding = PaddingValues(bottom = 32.dp),
     ) {
       item {
-        Text(
-          text = "Remote Settings",
-          style = MaterialTheme.typography.headlineSmall,
-        )
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+          Text(
+            text = "Remote Settings",
+            style = MaterialTheme.typography.headlineSmall,
+          )
+          IconButton(
+            onClick = onDismiss,
+            modifier = Modifier.size(48.dp).testTag("settings_close_button"),
+          ) {
+            Icon(
+              imageVector = Icons.Rounded.Close,
+              contentDescription = "Close Settings",
+            )
+          }
+        }
+      }
+
+      // Customize UI & Remote Layout Card
+      item {
+        val prefs = uiState.uiPreferences
+        Surface(
+          color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.24f),
+          shape = RoundedCornerShape(18.dp),
+          border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)),
+          modifier =
+            Modifier
+              .fillMaxWidth()
+              .clip(RoundedCornerShape(18.dp))
+              .clickable(onClick = onOpenCustomizeUi)
+              .testTag("settings_customize_ui_button"),
+        ) {
+          Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+          ) {
+            Box(
+              modifier =
+                Modifier
+                  .size(40.dp)
+                  .clip(CircleShape)
+                  .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)),
+              contentAlignment = Alignment.Center,
+            ) {
+              Icon(
+                imageVector = Icons.Rounded.Tune,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+              )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+              Text(
+                text = "Customize UI & Layout",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+              )
+              Text(
+                text =
+                  "${prefs.themeMode.displayName} mode • ${prefs.accentTheme.displayName} • ${if (prefs.compactMode) "Compact" else "Standard"} • ${prefs.enabledShortcutIds.size} OTT apps",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+              )
+            }
+            Icon(
+              imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+              contentDescription = "Open UI Customization",
+              tint = MaterialTheme.colorScheme.primary,
+            )
+          }
+        }
+      }
+
+      // Theme Mode (System / Dark / Light)
+      item {
+        Surface(
+          color = MaterialTheme.colorScheme.surfaceVariant,
+          shape = RoundedCornerShape(18.dp),
+          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+          ) {
+            Text(
+              text = "THEME MODE",
+              style = MaterialTheme.typography.labelMedium,
+              color = MaterialTheme.colorScheme.primary,
+            )
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+              AppThemeMode.entries.forEach { mode ->
+                val selected = uiState.uiPreferences.themeMode == mode
+                val icon =
+                  when (mode) {
+                    AppThemeMode.SYSTEM -> Icons.Rounded.BrightnessAuto
+                    AppThemeMode.DARK -> Icons.Rounded.DarkMode
+                    AppThemeMode.LIGHT -> Icons.Rounded.LightMode
+                  }
+                FilterChip(
+                  selected = selected,
+                  onClick = { onSelectThemeMode(mode) },
+                  leadingIcon = {
+                    Icon(
+                      imageVector = icon,
+                      contentDescription = null,
+                      modifier = Modifier.size(16.dp),
+                    )
+                  },
+                  label = {
+                    Text(
+                      text = mode.displayName,
+                      maxLines = 1,
+                      softWrap = false,
+                    )
+                  },
+                  colors =
+                    FilterChipDefaults.filterChipColors(
+                      selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                      selectedLabelColor = MaterialTheme.colorScheme.primary,
+                      selectedLeadingIconColor = MaterialTheme.colorScheme.primary,
+                    ),
+                  border =
+                    FilterChipDefaults.filterChipBorder(
+                      enabled = true,
+                      selected = selected,
+                      borderColor = MaterialTheme.colorScheme.outline,
+                      selectedBorderColor = MaterialTheme.colorScheme.primary,
+                    ),
+                  modifier = Modifier.weight(1f).testTag("settings_theme_mode_${mode.storageKey}"),
+                )
+              }
+            }
+          }
+        }
       }
 
       // Haptics & Sound Effects Section
@@ -1319,9 +1485,9 @@ fun SettingsModalSheet(
             horizontalArrangement = Arrangement.SpaceBetween,
           ) {
             Column(modifier = Modifier.weight(1f)) {
-              Text("Auto-Reconnect on Launch", style = MaterialTheme.typography.titleSmall)
+              Text("Keep Connected & Auto-Reconnect", style = MaterialTheme.typography.titleSmall)
               Text(
-                "Automatically reconnect to the last paired TV",
+                "Automatically reconnect on launch and when returning from other apps",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
               )
@@ -1336,6 +1502,122 @@ fun SettingsModalSheet(
                 ),
               modifier = Modifier.testTag("settings_autoreconnect_switch"),
             )
+          }
+        }
+      }
+
+      // App Updates Section
+      item {
+        var repoInput by remember {
+          mutableStateOf(uiState.settings.releaseRepoOverride)
+        }
+        val repoPlaceholder =
+          BuildConfig.RELEASE_REPO.trim().ifBlank { "e.g. username/yv-tv-remote" }
+        Surface(
+          color = MaterialTheme.colorScheme.surfaceVariant,
+          shape = RoundedCornerShape(18.dp),
+          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+          ) {
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.SpaceBetween,
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              Text(
+                text = "APP UPDATES",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+              )
+              Text(
+                text = "v${BuildConfig.VERSION_NAME} (#${BuildConfig.VERSION_CODE})",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+            }
+
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+              Column(modifier = Modifier.weight(1f)) {
+                Text("Auto-Notify New Releases", style = MaterialTheme.typography.titleSmall)
+                Text(
+                  "Automatically check & notify when a new version is published",
+                  style = MaterialTheme.typography.bodyMedium,
+                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+              }
+              Switch(
+                checked = uiState.settings.autoCheckUpdates,
+                onCheckedChange = onToggleAutoCheckUpdates,
+                colors =
+                  SwitchDefaults.colors(
+                    checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                    checkedTrackColor = MaterialTheme.colorScheme.primary,
+                  ),
+                modifier = Modifier.testTag("settings_autoupdate_switch"),
+              )
+            }
+
+            OutlinedTextField(
+              value = repoInput,
+              onValueChange = {
+                repoInput = it
+                onChangeReleaseRepo(it)
+              },
+              label = { Text("GitHub Repo (owner/repo)") },
+              placeholder = { Text(repoPlaceholder) },
+              singleLine = true,
+              modifier = Modifier.fillMaxWidth().testTag("settings_release_repo_input"),
+            )
+
+            uiState.updateStatusMessage?.let { statusMsg ->
+              Text(
+                text = statusMsg,
+                style = MaterialTheme.typography.bodySmall,
+                color =
+                  if (uiState.availableUpdate != null) MaterialTheme.colorScheme.primary
+                  else MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+            }
+
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+              OutlinedButton(
+                onClick = onCheckUpdatesNow,
+                enabled = !uiState.isCheckingUpdates,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                modifier = Modifier.weight(1f).testTag("settings_check_updates_button"),
+              ) {
+                if (uiState.isCheckingUpdates) {
+                  CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                  Spacer(Modifier.width(8.dp))
+                }
+                Text("Check Now", maxLines = 1, softWrap = false)
+              }
+
+              if (uiState.availableUpdate != null) {
+                Button(
+                  onClick = onOpenAvailableUpdate,
+                  colors =
+                    ButtonDefaults.buttonColors(
+                      containerColor = MaterialTheme.colorScheme.primary,
+                      contentColor = MaterialTheme.colorScheme.onPrimary,
+                    ),
+                  modifier = Modifier.weight(1f).testTag("settings_install_update_button"),
+                ) {
+                  Text("Update", maxLines = 1, softWrap = false)
+                }
+              }
+            }
           }
         }
       }

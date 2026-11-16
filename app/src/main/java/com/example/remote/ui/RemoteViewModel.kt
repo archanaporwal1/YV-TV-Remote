@@ -5,11 +5,19 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.proto.remote.RemoteDirection
 import com.example.proto.remote.RemoteKeyCode
+import androidx.compose.ui.graphics.Color
 import com.example.remote.data.AppSettings
+import com.example.remote.data.CustomOttIconStyle
+import com.example.remote.data.PreferredPadMode
 import com.example.remote.data.RemotePreferencesStore
+import com.example.remote.data.RemoteUiPreferences
 import com.example.remote.data.SavedTvConnection
 import com.example.remote.data.TvAppShortcut
+import com.example.remote.data.TvAppShortcuts
+import com.example.remote.data.UiLayoutPreset
 import com.example.remote.data.UserProfile
+import com.example.ui.theme.AppThemeMode
+import com.example.ui.theme.RemoteAccentTheme
 import com.example.remote.discovery.DiscoveredTv
 import com.example.remote.discovery.TvDiscoveryManager
 import com.example.remote.feedback.FeedbackCue
@@ -18,12 +26,21 @@ import com.example.remote.protocol.CertificateManager
 import com.example.remote.protocol.PairingClient
 import com.example.remote.protocol.RemoteControlClient
 import com.example.remote.protocol.TvImeState
+import com.example.remote.update.AppReleaseInfo
+import com.example.remote.update.AppUpdateManager
+import com.example.remote.update.UpdateCheckJobService
+import com.example.remote.update.UpdateCheckResult
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 
 enum class RemoteInputMode {
@@ -78,12 +95,18 @@ data class RemoteUiState(
   val activeProfileId: String = RemotePreferencesStore.DEFAULT_PROFILE_ID,
   val savedConnections: List<SavedTvConnection> = emptyList(),
   val settings: AppSettings = AppSettings(),
+  val uiPreferences: RemoteUiPreferences = RemoteUiPreferences(),
   val inputMode: RemoteInputMode = RemoteInputMode.DPAD,
   val showConnectionHub: Boolean = true,
   val showSettingsSheet: Boolean = false,
+  val showCustomizeUiSheet: Boolean = false,
   val showKeyboardSheet: Boolean = false,
   val tvImeState: TvImeState = TvImeState(),
   val statusBannerMessage: String? = null,
+  val availableUpdate: AppReleaseInfo? = null,
+  val showUpdateDialog: Boolean = false,
+  val isCheckingUpdates: Boolean = false,
+  val updateStatusMessage: String? = null,
 )
 
 class RemoteViewModel(application: Application) : AndroidViewModel(application) {
@@ -100,8 +123,15 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
   private var activePairingSession: PairingClient.ActivePairingSession? = null
   private var pendingTarget: PendingConnectionTarget? = null
+  private var lastActiveTarget: PendingConnectionTarget? = null
+  private var isAppInForeground = true
+  private var userManuallyDisconnected = false
+  private var navigateToRemoteOnConnect = true
   private var autoConnectAttempted = false
   private var postPairingReconnectRetryAvailable = false
+  private var unexpectedDisconnectRetryCount = 0
+  private var autoReconnectJob: Job? = null
+  private val reconnectMutex = Mutex()
 
   init {
     loadStoredState()
@@ -109,6 +139,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     observeRemoteSession()
     observeTvImeState()
     attemptAutoReconnectIfEnabled()
+    syncAndCheckUpdatesOnStartup()
   }
 
   private fun observeTvImeState() {
@@ -127,6 +158,10 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
       }
     val saved = prefsStore.loadSavedConnections()
     val settings = prefsStore.loadSettings()
+    val uiPrefs = prefsStore.loadUiPreferences()
+    val initialMode =
+      if (uiPrefs.defaultPadMode == PreferredPadMode.TOUCHPAD) RemoteInputMode.TOUCHPAD
+      else RemoteInputMode.DPAD
 
     _uiState.update {
       it.copy(
@@ -134,6 +169,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         activeProfileId = activeProfileId,
         savedConnections = saved,
         settings = settings,
+        uiPreferences = uiPrefs,
+        inputMode = initialMode,
       )
     }
   }
@@ -161,6 +198,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
       remoteClient.sessionEvent.collect { event ->
         when (event) {
           is RemoteControlClient.SessionEvent.Disconnected -> {
+            unexpectedDisconnectRetryCount = 0
             _uiState.update { state ->
               if (state.connectionStatus is ConnectionStatus.Pairing) {
                 state
@@ -186,8 +224,10 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
           is RemoteControlClient.SessionEvent.Connected -> {
             postPairingReconnectRetryAvailable = false
-            val target = pendingTarget
+            unexpectedDisconnectRetryCount = 0
+            val target = pendingTarget ?: lastActiveTarget
             if (target != null) {
+              lastActiveTarget = target
               val saved =
                 prefsStore.upsertConnection(
                   profileId = target.profileId,
@@ -207,7 +247,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                       ipAddress = saved.ipAddress,
                       port = saved.port,
                     ),
-                  showConnectionHub = false,
+                  showConnectionHub = if (navigateToRemoteOnConnect) false else it.showConnectionHub,
                   statusBannerMessage = null,
                 )
               }
@@ -215,6 +255,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
           }
 
           is RemoteControlClient.SessionEvent.PairingRequired -> {
+            unexpectedDisconnectRetryCount = 0
             val target = pendingTarget
             if (target != null) {
               if (postPairingReconnectRetryAvailable) {
@@ -223,6 +264,40 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 remoteClient.connect(target.ipAddress, target.controlPort)
               } else {
                 initiatePairing(target)
+              }
+            }
+          }
+
+          is RemoteControlClient.SessionEvent.ConnectionLost -> {
+            postPairingReconnectRetryAvailable = false
+            val state = _uiState.value
+            if (state.connectionStatus is ConnectionStatus.Pairing) {
+              return@collect
+            }
+            val target = pendingTarget ?: lastActiveTarget
+            if (userManuallyDisconnected || target == null || !state.settings.autoReconnectEnabled) {
+              _uiState.update {
+                it.copy(connectionStatus = ConnectionStatus.Disconnected)
+              }
+            } else if (!isAppInForeground) {
+              // Hold quietly while backgrounded; onAppForegrounded() will immediately resume.
+              _uiState.update {
+                it.copy(connectionStatus = ConnectionStatus.Disconnected)
+              }
+            } else if (unexpectedDisconnectRetryCount < MAX_AUTO_RECONNECT_ATTEMPTS) {
+              unexpectedDisconnectRetryCount++
+              scheduleSilentReconnect(target, delayMs = 400L)
+            } else {
+              _uiState.update {
+                it.copy(
+                  connectionStatus =
+                    ConnectionStatus.Error(
+                      message = event.message,
+                      targetIp = target.ipAddress,
+                      targetPort = target.controlPort,
+                      targetName = target.customName,
+                    )
+                )
               }
             }
           }
@@ -255,6 +330,60 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     val lastId = prefsStore.getLastConnectedTvId() ?: return
     val lastTv = state.savedConnections.firstOrNull { it.id == lastId } ?: return
     connectToSavedTv(lastTv)
+  }
+
+  fun onAppBackgrounded() {
+    isAppInForeground = false
+    autoReconnectJob?.cancel()
+    autoReconnectJob = null
+  }
+
+  fun onAppForegrounded() {
+    isAppInForeground = true
+    val state = _uiState.value
+    if (userManuallyDisconnected) return
+    if (!state.settings.autoReconnectEnabled) return
+    if (state.connectionStatus is ConnectionStatus.Pairing) return
+    if (state.connectionStatus is ConnectionStatus.Connecting) return
+
+    val target = lastActiveTarget ?: resolveLastSavedTarget(state) ?: return
+    if (!remoteClient.isConnectionHealthy() || state.connectionStatus !is ConnectionStatus.Connected) {
+      unexpectedDisconnectRetryCount = 0
+      scheduleSilentReconnect(target, delayMs = 0L)
+    }
+  }
+
+  private fun resolveLastSavedTarget(state: RemoteUiState): PendingConnectionTarget? {
+    val lastId = prefsStore.getLastConnectedTvId() ?: return null
+    val savedTv = state.savedConnections.firstOrNull { it.id == lastId } ?: return null
+    return PendingConnectionTarget(
+      ipAddress = savedTv.ipAddress,
+      controlPort = savedTv.port,
+      deviceName = savedTv.deviceName,
+      customName = savedTv.customName,
+      profileId = savedTv.profileId,
+    )
+  }
+
+  private fun scheduleSilentReconnect(target: PendingConnectionTarget, delayMs: Long) {
+    if (autoReconnectJob?.isActive == true) return
+    autoReconnectJob =
+      viewModelScope.launch {
+        if (delayMs > 0L) {
+          delay(delayMs)
+        }
+        if (!isAppInForeground || userManuallyDisconnected) return@launch
+        if (!_uiState.value.settings.autoReconnectEnabled) return@launch
+        if (_uiState.value.connectionStatus is ConnectionStatus.Pairing) return@launch
+
+        reconnectMutex.withLock {
+          if (remoteClient.isConnectionHealthy()) return@withLock
+          pendingTarget = target
+          lastActiveTarget = target
+          navigateToRemoteOnConnect = !_uiState.value.showConnectionHub
+          remoteClient.connect(target.ipAddress, target.controlPort)
+        }
+      }
   }
 
   fun startDiscoveryScan() {
@@ -325,17 +454,38 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         customName = customName.trim().ifEmpty { deviceName },
         profileId = _uiState.value.activeProfileId,
       )
+    userManuallyDisconnected = false
+    navigateToRemoteOnConnect = true
     pendingTarget = target
+    lastActiveTarget = target
     initiatePairing(target)
   }
 
   private fun connectWithAutoPair(target: PendingConnectionTarget) {
+    autoReconnectJob?.cancel()
+    autoReconnectJob = null
     cancelPairingInternal()
+    userManuallyDisconnected = false
+    navigateToRemoteOnConnect = true
+    unexpectedDisconnectRetryCount = 0
     postPairingReconnectRetryAvailable = false
     pendingTarget = target
+    lastActiveTarget = target
     discoveryManager.stopScan()
+    _uiState.update {
+      it.copy(
+        connectionStatus =
+          ConnectionStatus.Connecting(
+            targetName = target.customName,
+            ipAddress = target.ipAddress,
+            port = target.controlPort,
+          )
+      )
+    }
     viewModelScope.launch {
-      remoteClient.connect(target.ipAddress, target.controlPort)
+      reconnectMutex.withLock {
+        remoteClient.connect(target.ipAddress, target.controlPort)
+      }
     }
   }
 
@@ -416,7 +566,15 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
       when (val result = session.submitPin(pin)) {
         is PairingClient.PinSubmitResult.Success -> {
           activePairingSession = null
-          val target = pendingTarget!!
+          val target =
+            pendingTarget
+              ?: PendingConnectionTarget(
+                ipAddress = currentPairing.targetIp,
+                controlPort = currentPairing.controlPort,
+                deviceName = currentPairing.defaultName,
+                customName = finalName,
+                profileId = _uiState.value.activeProfileId,
+              )
           val saved =
             prefsStore.upsertConnection(
               profileId = target.profileId,
@@ -481,6 +639,12 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   }
 
   fun disconnect() {
+    userManuallyDisconnected = true
+    autoReconnectJob?.cancel()
+    autoReconnectJob = null
+    pendingTarget = null
+    lastActiveTarget = null
+    unexpectedDisconnectRetryCount = 0
     cancelPairingInternal()
     remoteClient.disconnect()
     _uiState.update {
@@ -520,21 +684,25 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   fun submitKeyboardSearch(text: String, useDirectKeys: Boolean) {
     feedbackManager.trigger(FeedbackCue.CONFIRM_CHIME, _uiState.value.settings)
     viewModelScope.launch {
-      if (_uiState.value.connectionStatus !is ConnectionStatus.Connected) {
+      val sent =
+        sendWithAutoRecovery {
+          val textOk =
+            if (useDirectKeys) {
+              remoteClient.sendTextAsKeyEvents(text)
+            } else {
+              val prevLen = _uiState.value.tvImeState.currentText.length
+              remoteClient.sendImeText(newText = text, previousLength = prevLen)
+            }
+          if (textOk) {
+            remoteClient.sendKey(RemoteKeyCode.KEYCODE_ENTER, RemoteDirection.SHORT)
+          } else {
+            false
+          }
+        }
+      if (!sent && _uiState.value.connectionStatus !is ConnectionStatus.Connected) {
         _uiState.update {
           it.copy(statusBannerMessage = "Not connected to a TV. Connect or pair a device first.")
         }
-        return@launch
-      }
-      val sent =
-        if (useDirectKeys) {
-          remoteClient.sendTextAsKeyEvents(text)
-        } else {
-          val prevLen = _uiState.value.tvImeState.currentText.length
-          remoteClient.sendImeText(newText = text, previousLength = prevLen)
-        }
-      if (sent) {
-        remoteClient.sendKey(RemoteKeyCode.KEYCODE_ENTER, RemoteDirection.SHORT)
       }
     }
   }
@@ -551,7 +719,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   fun sendKey(keyCode: RemoteKeyCode, cue: FeedbackCue = FeedbackCue.NAV_TICK) {
     feedbackManager.trigger(cue, _uiState.value.settings)
     viewModelScope.launch {
-      val sent = remoteClient.sendKey(keyCode, RemoteDirection.SHORT)
+      val sent = sendWithAutoRecovery { remoteClient.sendKey(keyCode, RemoteDirection.SHORT) }
       if (!sent && _uiState.value.connectionStatus !is ConnectionStatus.Connected) {
         _uiState.update {
           it.copy(statusBannerMessage = "Not connected to a TV. Connect or pair a device first.")
@@ -563,7 +731,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   fun launchShortcut(shortcut: TvAppShortcut) {
     feedbackManager.trigger(FeedbackCue.POWER_OR_APP, _uiState.value.settings)
     viewModelScope.launch {
-      val sent = remoteClient.launchApp(shortcut.appLink)
+      val sent = sendWithAutoRecovery { remoteClient.launchApp(shortcut.appLink) }
       _uiState.update {
         it.copy(
           statusBannerMessage =
@@ -572,6 +740,35 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         )
       }
     }
+  }
+
+  private suspend fun sendWithAutoRecovery(action: suspend () -> Boolean): Boolean {
+    if (action()) return true
+    val target = lastActiveTarget ?: pendingTarget ?: return false
+    if (userManuallyDisconnected || !_uiState.value.settings.autoReconnectEnabled) return false
+    if (_uiState.value.connectionStatus is ConnectionStatus.Pairing) return false
+
+    val reconnected =
+      reconnectMutex.withLock {
+        if (remoteClient.isConnectionHealthy()) {
+          true
+        } else {
+          pendingTarget = target
+          lastActiveTarget = target
+          navigateToRemoteOnConnect = !_uiState.value.showConnectionHub
+          remoteClient.connect(target.ipAddress, target.controlPort)
+          val event =
+            withTimeoutOrNull(RECONNECT_BEFORE_RETRY_TIMEOUT_MS) {
+              remoteClient.sessionEvent.first {
+                it is RemoteControlClient.SessionEvent.Connected ||
+                  it is RemoteControlClient.SessionEvent.PairingRequired ||
+                  it is RemoteControlClient.SessionEvent.Error
+              }
+            }
+          event is RemoteControlClient.SessionEvent.Connected
+        }
+      }
+    return if (reconnected) action() else false
   }
 
   fun clearBannerMessage() {
@@ -738,15 +935,335 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     _uiState.update { it.copy(settings = updated) }
   }
 
+  fun updateAutoCheckUpdates(enabled: Boolean) {
+    val updated = _uiState.value.settings.copy(autoCheckUpdates = enabled)
+    prefsStore.saveSettings(updated)
+    _uiState.update { it.copy(settings = updated) }
+    UpdateCheckJobService.syncSchedule(getApplication(), enabled)
+    if (enabled) {
+      checkForUpdates(manual = false)
+    }
+  }
+
+  fun updateReleaseRepoOverride(repo: String) {
+    val updated = _uiState.value.settings.copy(releaseRepoOverride = repo.trim())
+    prefsStore.saveSettings(updated)
+    _uiState.update { it.copy(settings = updated, updateStatusMessage = null) }
+  }
+
+  private fun syncAndCheckUpdatesOnStartup() {
+    val settings = _uiState.value.settings
+    UpdateCheckJobService.syncSchedule(getApplication(), settings.autoCheckUpdates)
+    if (settings.autoCheckUpdates && AppUpdateManager.resolveSource(settings.releaseRepoOverride).isNotBlank()) {
+      checkForUpdates(manual = false)
+    }
+  }
+
+  fun checkForUpdates(manual: Boolean = true) {
+    if (_uiState.value.isCheckingUpdates) return
+    val settings = _uiState.value.settings
+    _uiState.update {
+      it.copy(
+        isCheckingUpdates = true,
+        updateStatusMessage = if (manual) "Checking for updates..." else it.updateStatusMessage,
+      )
+    }
+    viewModelScope.launch {
+      when (val result = AppUpdateManager.checkForUpdate(settings.releaseRepoOverride)) {
+        is UpdateCheckResult.UpdateAvailable -> {
+          val release = result.release
+          val skipped = prefsStore.getSkippedUpdateTag()
+          val shouldSurface = manual || release.tag != skipped
+          if (shouldSurface && release.tag != prefsStore.getLastNotifiedUpdateTag()) {
+            AppUpdateManager.showUpdateNotification(getApplication(), release)
+            prefsStore.setLastNotifiedUpdateTag(release.tag)
+          }
+          _uiState.update {
+            it.copy(
+              isCheckingUpdates = false,
+              availableUpdate = if (shouldSurface) release else it.availableUpdate,
+              showUpdateDialog = if (manual && shouldSurface) true else it.showUpdateDialog,
+              updateStatusMessage = "Update v${release.versionName} available!",
+            )
+          }
+        }
+
+        is UpdateCheckResult.UpToDate -> {
+          _uiState.update {
+            it.copy(
+              isCheckingUpdates = false,
+              availableUpdate = null,
+              updateStatusMessage = "Up to date (v${result.currentVersion})",
+            )
+          }
+        }
+
+        UpdateCheckResult.NotConfigured -> {
+          _uiState.update {
+            it.copy(
+              isCheckingUpdates = false,
+              updateStatusMessage =
+                if (manual) "Set GitHub owner/repo above to enable release checks."
+                else null,
+            )
+          }
+        }
+
+        is UpdateCheckResult.Error -> {
+          _uiState.update {
+            it.copy(
+              isCheckingUpdates = false,
+              updateStatusMessage = if (manual) "Update check failed: ${result.message}" else it.updateStatusMessage,
+            )
+          }
+        }
+      }
+    }
+  }
+
+  fun openUpdateDialog(show: Boolean) {
+    _uiState.update { it.copy(showUpdateDialog = show) }
+  }
+
+  fun downloadAvailableUpdate() {
+    val release = _uiState.value.availableUpdate ?: return
+    AppUpdateManager.openUpdateDownload(getApplication(), release)
+    _uiState.update { it.copy(showUpdateDialog = false) }
+  }
+
+  fun skipAvailableUpdate() {
+    val release = _uiState.value.availableUpdate ?: return
+    prefsStore.setSkippedUpdateTag(release.tag)
+    _uiState.update {
+      it.copy(
+        availableUpdate = null,
+        showUpdateDialog = false,
+        statusBannerMessage = "Skipped update v${release.versionName}",
+      )
+    }
+  }
+
   fun previewFeedback() {
     feedbackManager.trigger(FeedbackCue.CONFIRM_CHIME, _uiState.value.settings)
   }
 
+  // --- UI & Layout Customization ---
+
+  fun openCustomizeUiSheet(show: Boolean) {
+    _uiState.update { it.copy(showCustomizeUiSheet = show) }
+  }
+
+  fun updateUiPreferences(transform: (RemoteUiPreferences) -> RemoteUiPreferences) {
+    val updated = transform(_uiState.value.uiPreferences)
+    prefsStore.saveUiPreferences(updated)
+    _uiState.update { it.copy(uiPreferences = updated) }
+  }
+
+  fun setPreferredPadMode(mode: PreferredPadMode) {
+    feedbackManager.trigger(FeedbackCue.NAV_TICK, _uiState.value.settings)
+    val updated = _uiState.value.uiPreferences.copy(defaultPadMode = mode)
+    prefsStore.saveUiPreferences(updated)
+    _uiState.update {
+      it.copy(
+        uiPreferences = updated,
+        inputMode =
+          if (mode == PreferredPadMode.TOUCHPAD) RemoteInputMode.TOUCHPAD
+          else RemoteInputMode.DPAD,
+      )
+    }
+  }
+
+  fun setThemeMode(mode: AppThemeMode) {
+    feedbackManager.trigger(FeedbackCue.NAV_TICK, _uiState.value.settings)
+    updateUiPreferences { it.copy(themeMode = mode) }
+  }
+
+  fun setAccentTheme(theme: RemoteAccentTheme) {
+    feedbackManager.trigger(FeedbackCue.NAV_TICK, _uiState.value.settings)
+    updateUiPreferences { it.copy(accentTheme = theme) }
+  }
+
+  fun applyUiPreset(preset: UiLayoutPreset) {
+    feedbackManager.trigger(FeedbackCue.CONFIRM_CHIME, _uiState.value.settings)
+    updateUiPreferences { current ->
+      when (preset) {
+        UiLayoutPreset.FULL ->
+          current.copy(
+            compactMode = false,
+            showQuickSearchBar = true,
+            showNavigationRow = true,
+            showVolumeAndChannel = true,
+            showMediaTransport = true,
+            showStreamingShortcuts = true,
+            shortcutColumns = 3,
+          )
+        UiLayoutPreset.MINIMAL ->
+          current.copy(
+            compactMode = true,
+            showQuickSearchBar = false,
+            showNavigationRow = true,
+            showVolumeAndChannel = true,
+            showMediaTransport = false,
+            showStreamingShortcuts = false,
+          )
+        UiLayoutPreset.STREAMING ->
+          current.copy(
+            compactMode = true,
+            showQuickSearchBar = true,
+            showNavigationRow = true,
+            showVolumeAndChannel = true,
+            showMediaTransport = true,
+            showStreamingShortcuts = true,
+            shortcutColumns = 3,
+          )
+      }
+    }
+  }
+
+  fun toggleShortcutEnabled(shortcutId: String) {
+    feedbackManager.trigger(FeedbackCue.NAV_TICK, _uiState.value.settings)
+    updateUiPreferences { current ->
+      val nextIds =
+        if (shortcutId in current.enabledShortcutIds) {
+          current.enabledShortcutIds - shortcutId
+        } else {
+          current.enabledShortcutIds + shortcutId
+        }
+      current.copy(enabledShortcutIds = nextIds)
+    }
+  }
+
+  fun selectAllShortcuts() {
+    feedbackManager.trigger(FeedbackCue.NAV_TICK, _uiState.value.settings)
+    updateUiPreferences { current ->
+      current.copy(enabledShortcutIds = current.allAvailableShortcuts().map { it.id }.toSet())
+    }
+  }
+
+  fun addPopularOttShortcut(preset: TvAppShortcut) {
+    feedbackManager.trigger(FeedbackCue.CONFIRM_CHIME, _uiState.value.settings)
+    updateUiPreferences { current ->
+      val existing = current.customShortcuts.any { it.id == preset.id }
+      val nextCustom =
+        if (existing) current.customShortcuts
+        else current.customShortcuts + preset.copy(isCustom = true)
+      current.copy(
+        customShortcuts = nextCustom,
+        enabledShortcutIds = current.enabledShortcutIds + preset.id,
+        showStreamingShortcuts = true,
+      )
+    }
+    _uiState.update { it.copy(statusBannerMessage = "Added ${preset.name} to your remote") }
+  }
+
+  fun addCustomOttShortcut(
+    name: String,
+    appLink: String,
+    badge: String,
+    accentColor: Color,
+    iconStyle: CustomOttIconStyle,
+  ) {
+    val cleanName = name.trim()
+    val normalizedLink = TvAppShortcuts.normalizeAppLink(appLink)
+    if (cleanName.isEmpty() || normalizedLink.isEmpty()) return
+
+    feedbackManager.trigger(FeedbackCue.CONFIRM_CHIME, _uiState.value.settings)
+    val newShortcut =
+      TvAppShortcut(
+        id = "custom_${UUID.randomUUID().toString().take(8)}",
+        name = cleanName,
+        badge = badge.trim().ifEmpty { TvAppShortcuts.suggestBadge(cleanName) }.take(3),
+        appLink = normalizedLink,
+        accentColor = accentColor,
+        isCustom = true,
+        iconStyle = iconStyle,
+      )
+    updateUiPreferences { current ->
+      current.copy(
+        customShortcuts = current.customShortcuts + newShortcut,
+        enabledShortcutIds = current.enabledShortcutIds + newShortcut.id,
+        showStreamingShortcuts = true,
+      )
+    }
+    _uiState.update { it.copy(statusBannerMessage = "Added \"$cleanName\" to your remote") }
+  }
+
+  fun updateCustomOttShortcut(
+    id: String,
+    name: String,
+    appLink: String,
+    badge: String,
+    accentColor: Color,
+    iconStyle: CustomOttIconStyle,
+  ) {
+    val cleanName = name.trim()
+    val normalizedLink = TvAppShortcuts.normalizeAppLink(appLink)
+    if (cleanName.isEmpty() || normalizedLink.isEmpty()) return
+
+    feedbackManager.trigger(FeedbackCue.CONFIRM_CHIME, _uiState.value.settings)
+    updateUiPreferences { current ->
+      val updatedCustom =
+        current.customShortcuts.map { shortcut ->
+          if (shortcut.id == id) {
+            shortcut.copy(
+              name = cleanName,
+              badge = badge.trim().ifEmpty { TvAppShortcuts.suggestBadge(cleanName) }.take(3),
+              appLink = normalizedLink,
+              accentColor = accentColor,
+              iconStyle = iconStyle,
+            )
+          } else {
+            shortcut
+          }
+        }
+      current.copy(customShortcuts = updatedCustom)
+    }
+    _uiState.update { it.copy(statusBannerMessage = "Updated \"$cleanName\"") }
+  }
+
+  fun deleteCustomOttShortcut(id: String) {
+    feedbackManager.trigger(FeedbackCue.NAV_TICK, _uiState.value.settings)
+    val removedName = _uiState.value.uiPreferences.customShortcuts.firstOrNull { it.id == id }?.name
+    updateUiPreferences { current ->
+      current.copy(
+        customShortcuts = current.customShortcuts.filterNot { it.id == id },
+        enabledShortcutIds = current.enabledShortcutIds - id,
+      )
+    }
+    if (!removedName.isNullOrBlank()) {
+      _uiState.update { it.copy(statusBannerMessage = "Removed \"$removedName\"") }
+    }
+  }
+
+  fun resetUiPreferences() {
+    feedbackManager.trigger(FeedbackCue.CONFIRM_CHIME, _uiState.value.settings)
+    val preservedCustom = _uiState.value.uiPreferences.customShortcuts
+    val defaults =
+      RemoteUiPreferences(
+        customShortcuts = preservedCustom,
+        enabledShortcutIds = TvAppShortcuts.defaultEnabledIds + preservedCustom.map { it.id },
+      )
+    prefsStore.saveUiPreferences(defaults)
+    _uiState.update {
+      it.copy(
+        uiPreferences = defaults,
+        inputMode = RemoteInputMode.DPAD,
+        statusBannerMessage = "UI customization reset to defaults",
+      )
+    }
+  }
+
   override fun onCleared() {
     super.onCleared()
+    autoReconnectJob?.cancel()
     discoveryManager.stopScan()
     cancelPairingInternal()
     remoteClient.disconnect()
     feedbackManager.release()
+  }
+
+  companion object {
+    private const val MAX_AUTO_RECONNECT_ATTEMPTS = 2
+    private const val RECONNECT_BEFORE_RETRY_TIMEOUT_MS = 3_000L
   }
 }

@@ -7,6 +7,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -42,6 +43,7 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.TouchApp
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -51,6 +53,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -66,14 +69,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.proto.remote.RemoteKeyCode
 import com.example.remote.data.SavedTvConnection
+import com.example.remote.data.TvAppShortcut
 import com.example.remote.data.UserProfile
 import com.example.remote.discovery.DiscoveredTv
 import com.example.remote.feedback.FeedbackCue
 import com.example.ui.theme.AmberStatus
-import com.example.ui.theme.EmeraldLive
 
 @Composable
 fun YvTvRemoteApp(viewModel: RemoteViewModel) {
@@ -121,6 +127,26 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
       }
     }
 
+  val notificationPermissionLauncher =
+    rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.RequestPermission()
+    ) { _ -> }
+
+  val lifecycleOwner = LocalLifecycleOwner.current
+  DisposableEffect(lifecycleOwner) {
+    val observer = LifecycleEventObserver { _, event ->
+      when (event) {
+        Lifecycle.Event.ON_START -> viewModel.onAppForegrounded()
+        Lifecycle.Event.ON_STOP -> viewModel.onAppBackgrounded()
+        else -> Unit
+      }
+    }
+    lifecycleOwner.lifecycle.addObserver(observer)
+    onDispose {
+      lifecycleOwner.lifecycle.removeObserver(observer)
+    }
+  }
+
   LaunchedEffect(uiState.showConnectionHub, hasWifiPermission) {
     if (uiState.showConnectionHub && hasWifiPermission) {
       viewModel.startDiscoveryScan()
@@ -144,6 +170,8 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
   var savedTvToDelete by remember { mutableStateOf<SavedTvConnection?>(null) }
   var showCreateProfileDialog by remember { mutableStateOf(false) }
   var profileToRename by remember { mutableStateOf<UserProfile?>(null) }
+  var showAddOttDialog by remember { mutableStateOf(false) }
+  var customOttToEdit by remember { mutableStateOf<TvAppShortcut?>(null) }
 
   if (!uiState.showConnectionHub) {
     BackHandler {
@@ -178,16 +206,22 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
             onDeleteSavedTv = { savedTvToDelete = it },
             onConnectDiscoveredTv = { viewModel.connectToDiscoveredTv(it) },
             onSaveDiscoveredTv = { discoveredToSave = it },
+            onDownloadUpdate = { viewModel.downloadAvailableUpdate() },
+            onOpenUpdateDetails = { viewModel.openUpdateDialog(true) },
           )
         } else {
           RemoteControlScreen(
             uiState = uiState,
             onOpenConnectionHub = { viewModel.openConnectionHub() },
+            onOpenCustomizeUi = { viewModel.openCustomizeUiSheet(true) },
             onOpenSettings = { viewModel.openSettingsSheet(true) },
             onOpenKeyboard = { viewModel.openKeyboardSheet(true) },
             onSwitchInputMode = { viewModel.setInputMode(it) },
             onSendKey = { keyCode, cue -> viewModel.sendKey(keyCode, cue) },
             onLaunchShortcut = { viewModel.launchShortcut(it) },
+            onOpenAddOttDialog = { showAddOttDialog = true },
+            onDownloadUpdate = { viewModel.downloadAvailableUpdate() },
+            onOpenUpdateDetails = { viewModel.openUpdateDialog(true) },
           )
         }
       }
@@ -288,17 +322,105 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
     SettingsModalSheet(
       uiState = uiState,
       onDismiss = { viewModel.openSettingsSheet(false) },
+      onOpenCustomizeUi = {
+        viewModel.openSettingsSheet(false)
+        viewModel.openCustomizeUiSheet(true)
+      },
+      onSelectThemeMode = { viewModel.setThemeMode(it) },
       onToggleHaptics = { viewModel.updateHapticsEnabled(it) },
       onToggleSound = { viewModel.updateSoundEnabled(it) },
       onChangeSoundVolume = { viewModel.updateSoundVolume(it) },
       onTestFeedback = { viewModel.previewFeedback() },
       onToggleAutoReconnect = { viewModel.updateAutoReconnect(it) },
+      onToggleAutoCheckUpdates = { enabled ->
+        if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+          if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+          ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+          }
+        }
+        viewModel.updateAutoCheckUpdates(enabled)
+      },
+      onChangeReleaseRepo = { viewModel.updateReleaseRepoOverride(it) },
+      onCheckUpdatesNow = { viewModel.checkForUpdates(manual = true) },
+      onOpenAvailableUpdate = {
+        viewModel.openSettingsSheet(false)
+        viewModel.openUpdateDialog(true)
+      },
       onSelectProfile = { viewModel.selectProfile(it) },
       onCreateProfileClick = { showCreateProfileDialog = true },
       onRenameProfileClick = { profileToRename = it },
       onDeleteProfile = { viewModel.deleteProfile(it.id) },
       onEditSavedTv = { savedTvToEdit = it },
       onDeleteSavedTv = { savedTvToDelete = it },
+    )
+  }
+
+  if (uiState.showCustomizeUiSheet) {
+    CustomizeUiSheet(
+      uiPrefs = uiState.uiPreferences,
+      onDismiss = { viewModel.openCustomizeUiSheet(false) },
+      onApplyPreset = { viewModel.applyUiPreset(it) },
+      onSelectThemeMode = { viewModel.setThemeMode(it) },
+      onSelectAccentTheme = { viewModel.setAccentTheme(it) },
+      onSelectDefaultPad = { viewModel.setPreferredPadMode(it) },
+      onUpdatePreferences = { transform -> viewModel.updateUiPreferences(transform) },
+      onToggleShortcut = { viewModel.toggleShortcutEnabled(it) },
+      onSelectAllShortcuts = { viewModel.selectAllShortcuts() },
+      onOpenAddOttDialog = { showAddOttDialog = true },
+      onEditCustomShortcut = { customOttToEdit = it },
+      onDeleteCustomShortcut = { viewModel.deleteCustomOttShortcut(it) },
+      onResetDefaults = { viewModel.resetUiPreferences() },
+    )
+  }
+
+  if (showAddOttDialog || customOttToEdit != null) {
+    val editing = customOttToEdit
+    AddOrEditOttShortcutDialog(
+      editingShortcut = editing,
+      alreadyAddedIds = uiState.uiPreferences.customShortcuts.map { it.id }.toSet(),
+      onQuickAddPopular = { preset ->
+        viewModel.addPopularOttShortcut(preset)
+        showAddOttDialog = false
+        customOttToEdit = null
+      },
+      onSaveCustom = { name, appLink, badge, accentColor, iconStyle ->
+        if (editing != null) {
+          viewModel.updateCustomOttShortcut(
+            id = editing.id,
+            name = name,
+            appLink = appLink,
+            badge = badge,
+            accentColor = accentColor,
+            iconStyle = iconStyle,
+          )
+        } else {
+          viewModel.addCustomOttShortcut(
+            name = name,
+            appLink = appLink,
+            badge = badge,
+            accentColor = accentColor,
+            iconStyle = iconStyle,
+          )
+        }
+        showAddOttDialog = false
+        customOttToEdit = null
+      },
+      onDismiss = {
+        showAddOttDialog = false
+        customOttToEdit = null
+      },
+    )
+  }
+
+  val availableUpdate = uiState.availableUpdate
+  if (uiState.showUpdateDialog && availableUpdate != null) {
+    AppUpdateReleaseDialog(
+      release = availableUpdate,
+      onDownload = { viewModel.downloadAvailableUpdate() },
+      onSkipVersion = { viewModel.skipAvailableUpdate() },
+      onDismiss = { viewModel.openUpdateDialog(false) },
     )
   }
 
@@ -321,12 +443,23 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
 fun RemoteControlScreen(
   uiState: RemoteUiState,
   onOpenConnectionHub: () -> Unit,
+  onOpenCustomizeUi: () -> Unit,
   onOpenSettings: () -> Unit,
   onOpenKeyboard: () -> Unit,
   onSwitchInputMode: (RemoteInputMode) -> Unit,
   onSendKey: (RemoteKeyCode, FeedbackCue) -> Unit,
-  onLaunchShortcut: (com.example.remote.data.TvAppShortcut) -> Unit,
+  onLaunchShortcut: (TvAppShortcut) -> Unit,
+  onOpenAddOttDialog: () -> Unit,
+  onDownloadUpdate: () -> Unit,
+  onOpenUpdateDetails: () -> Unit,
 ) {
+  val uiPrefs = uiState.uiPreferences
+  val compact = uiPrefs.compactMode
+  val sectionSpacing = if (compact) 10.dp else 16.dp
+  val filteredShortcuts =
+    remember(uiPrefs.enabledShortcutIds, uiPrefs.customShortcuts) {
+      uiPrefs.enabledShortcuts()
+    }
   val activeProfileName =
     uiState.profiles.firstOrNull { it.id == uiState.activeProfileId }?.name ?: "Profile"
 
@@ -340,16 +473,31 @@ fun RemoteControlScreen(
       val isWideLayout = maxWidth >= 680.dp
 
       Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        modifier = Modifier.fillMaxSize(),
       ) {
+        Spacer(Modifier.height(10.dp))
         RemoteTopTelemetryBar(
           status = uiState.connectionStatus,
           activeProfileName = activeProfileName,
           onOpenConnectionHub = onOpenConnectionHub,
+          onOpenCustomizeUi = onOpenCustomizeUi,
           onOpenSettings = onOpenSettings,
           onPowerClick = { onSendKey(RemoteKeyCode.KEYCODE_POWER, FeedbackCue.POWER_OR_APP) },
         )
+        Spacer(Modifier.height(8.dp))
+
+        Column(
+          modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(vertical = 4.dp),
+          verticalArrangement = Arrangement.spacedBy(sectionSpacing),
+        ) {
+
+        uiState.availableUpdate?.let { release ->
+          UpdateAvailableBannerCard(
+            release = release,
+            onDownloadClick = onDownloadUpdate,
+            onDetailsClick = onOpenUpdateDetails,
+          )
+        }
 
         if (isWideLayout) {
           Row(
@@ -360,60 +508,93 @@ fun RemoteControlScreen(
             Column(
               modifier = Modifier.weight(1f),
               horizontalAlignment = Alignment.CenterHorizontally,
-              verticalArrangement = Arrangement.spacedBy(14.dp),
+              verticalArrangement = Arrangement.spacedBy(if (compact) 10.dp else 14.dp),
             ) {
               ModeAndKeyboardHeaderRow(
                 mode = uiState.inputMode,
                 isImeRequested = uiState.tvImeState.isImeRequested,
+                showQuickSearchBar = uiPrefs.showQuickSearchBar,
                 onSwitch = onSwitchInputMode,
                 onOpenKeyboard = onOpenKeyboard,
                 onOpenSearch = { onSendKey(RemoteKeyCode.KEYCODE_SEARCH, FeedbackCue.CONFIRM_CHIME) },
               )
               if (uiState.inputMode == RemoteInputMode.DPAD) {
-                ClassicDPadPod(onKey = onSendKey)
+                ClassicDPadPod(onKey = onSendKey, compact = compact)
               } else {
-                TouchpadSurfacePod(onKey = onSendKey)
+                TouchpadSurfacePod(onKey = onSendKey, compact = compact)
               }
-              PrimaryNavigationRow(onKey = onSendKey)
+              AnimatedVisibility(visible = uiPrefs.showNavigationRow) {
+                PrimaryNavigationRow(onKey = onSendKey, compact = compact)
+              }
             }
 
             Column(
               modifier = Modifier.weight(1f),
-              verticalArrangement = Arrangement.spacedBy(16.dp),
+              verticalArrangement = Arrangement.spacedBy(sectionSpacing),
             ) {
-              VolumeAndChannelPod(onKey = onSendKey)
-              MediaTransportBar(onKey = onSendKey)
-              StreamingShortcutsGrid(onLaunchShortcut = onLaunchShortcut)
+              AnimatedVisibility(visible = uiPrefs.showVolumeAndChannel) {
+                VolumeAndChannelPod(onKey = onSendKey, compact = compact)
+              }
+              AnimatedVisibility(visible = uiPrefs.showMediaTransport) {
+                MediaTransportBar(onKey = onSendKey, compact = compact)
+              }
+              AnimatedVisibility(visible = uiPrefs.showStreamingShortcuts) {
+                StreamingShortcutsGrid(
+                  onLaunchShortcut = onLaunchShortcut,
+                  shortcuts = filteredShortcuts,
+                  columns = uiPrefs.shortcutColumns,
+                  compact = compact,
+                  onOpenCustomize = onOpenCustomizeUi,
+                  onAddOttApp = onOpenAddOttDialog,
+                )
+              }
             }
           }
         } else {
           Column(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(if (compact) 10.dp else 14.dp),
           ) {
             ModeAndKeyboardHeaderRow(
               mode = uiState.inputMode,
               isImeRequested = uiState.tvImeState.isImeRequested,
+              showQuickSearchBar = uiPrefs.showQuickSearchBar,
               onSwitch = onSwitchInputMode,
               onOpenKeyboard = onOpenKeyboard,
               onOpenSearch = { onSendKey(RemoteKeyCode.KEYCODE_SEARCH, FeedbackCue.CONFIRM_CHIME) },
             )
 
             if (uiState.inputMode == RemoteInputMode.DPAD) {
-              ClassicDPadPod(onKey = onSendKey)
+              ClassicDPadPod(onKey = onSendKey, compact = compact)
             } else {
-              TouchpadSurfacePod(onKey = onSendKey)
+              TouchpadSurfacePod(onKey = onSendKey, compact = compact)
             }
 
-            PrimaryNavigationRow(onKey = onSendKey)
-            VolumeAndChannelPod(onKey = onSendKey)
-            MediaTransportBar(onKey = onSendKey)
-            StreamingShortcutsGrid(onLaunchShortcut = onLaunchShortcut)
+            AnimatedVisibility(visible = uiPrefs.showNavigationRow) {
+              PrimaryNavigationRow(onKey = onSendKey, compact = compact)
+            }
+            AnimatedVisibility(visible = uiPrefs.showVolumeAndChannel) {
+              VolumeAndChannelPod(onKey = onSendKey, compact = compact)
+            }
+            AnimatedVisibility(visible = uiPrefs.showMediaTransport) {
+              MediaTransportBar(onKey = onSendKey, compact = compact)
+            }
+            AnimatedVisibility(visible = uiPrefs.showStreamingShortcuts) {
+              StreamingShortcutsGrid(
+                onLaunchShortcut = onLaunchShortcut,
+                shortcuts = filteredShortcuts,
+                columns = uiPrefs.shortcutColumns,
+                compact = compact,
+                onOpenCustomize = onOpenCustomizeUi,
+                onAddOttApp = onOpenAddOttDialog,
+              )
+            }
           }
         }
 
-        Spacer(Modifier.height(12.dp))
+          Spacer(Modifier.height(12.dp))
+        }
       }
     }
   }
@@ -424,6 +605,7 @@ private fun RemoteTopTelemetryBar(
   status: ConnectionStatus,
   activeProfileName: String,
   onOpenConnectionHub: () -> Unit,
+  onOpenCustomizeUi: () -> Unit,
   onOpenSettings: () -> Unit,
   onPowerClick: () -> Unit,
 ) {
@@ -439,7 +621,7 @@ private fun RemoteTopTelemetryBar(
   val (title, subtitle, dotColor) =
     when (status) {
       is ConnectionStatus.Connected ->
-        Triple(status.displayName, "${status.ipAddress}:${status.port} • $activeProfileName", EmeraldLive)
+        Triple(status.displayName, "${status.ipAddress}:${status.port} • $activeProfileName", MaterialTheme.colorScheme.tertiary)
       is ConnectionStatus.Connecting ->
         Triple("Connecting...", "${status.targetName} (${status.ipAddress})", AmberStatus)
       is ConnectionStatus.Pairing ->
@@ -506,6 +688,22 @@ private fun RemoteTopTelemetryBar(
     }
 
     IconButton(
+      onClick = onOpenCustomizeUi,
+      modifier =
+        Modifier
+          .size(48.dp)
+          .clip(CircleShape)
+          .background(MaterialTheme.colorScheme.surface)
+          .testTag("remote_customize_ui_button"),
+    ) {
+      Icon(
+        imageVector = Icons.Rounded.Tune,
+        contentDescription = "Customize UI",
+        tint = MaterialTheme.colorScheme.primary,
+      )
+    }
+
+    IconButton(
       onClick = onOpenSettings,
       modifier =
         Modifier
@@ -542,6 +740,7 @@ private fun RemoteTopTelemetryBar(
 private fun ModeAndKeyboardHeaderRow(
   mode: RemoteInputMode,
   isImeRequested: Boolean,
+  showQuickSearchBar: Boolean,
   onSwitch: (RemoteInputMode) -> Unit,
   onOpenKeyboard: () -> Unit,
   onOpenSearch: () -> Unit,
@@ -556,43 +755,45 @@ private fun ModeAndKeyboardHeaderRow(
       onSwitch = onSwitch,
     )
 
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-      TactileKeyButton(
-        onClick = onOpenSearch,
-        contentDescription = "TV Search",
-        shape = CircleShape,
-        containerColor = MaterialTheme.colorScheme.surface,
-        borderColor = MaterialTheme.colorScheme.outlineVariant,
-        modifier = Modifier.size(48.dp).testTag("btn_tv_search"),
-      ) {
-        Icon(
-          imageVector = Icons.Rounded.Search,
-          contentDescription = "Search on TV",
-          tint = MaterialTheme.colorScheme.onSurface,
-          modifier = Modifier.size(20.dp),
-        )
-      }
+    AnimatedVisibility(visible = showQuickSearchBar) {
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        TactileKeyButton(
+          onClick = onOpenSearch,
+          contentDescription = "TV Search",
+          shape = CircleShape,
+          containerColor = MaterialTheme.colorScheme.surface,
+          borderColor = MaterialTheme.colorScheme.outlineVariant,
+          modifier = Modifier.size(48.dp).testTag("btn_tv_search"),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.Search,
+            contentDescription = "Search on TV",
+            tint = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.size(20.dp),
+          )
+        }
 
-      TactileKeyButton(
-        onClick = onOpenKeyboard,
-        contentDescription = "Mobile Keyboard",
-        shape = CircleShape,
-        containerColor =
-          if (isImeRequested) MaterialTheme.colorScheme.primaryContainer
-          else MaterialTheme.colorScheme.surface,
-        borderColor =
-          if (isImeRequested) MaterialTheme.colorScheme.primary
-          else MaterialTheme.colorScheme.outlineVariant,
-        modifier = Modifier.size(48.dp).testTag("btn_open_keyboard"),
-      ) {
-        Icon(
-          imageVector = Icons.Rounded.Keyboard,
-          contentDescription = "Open Mobile Keyboard",
-          tint =
+        TactileKeyButton(
+          onClick = onOpenKeyboard,
+          contentDescription = "Mobile Keyboard",
+          shape = CircleShape,
+          containerColor =
+            if (isImeRequested) MaterialTheme.colorScheme.primaryContainer
+            else MaterialTheme.colorScheme.surface,
+          borderColor =
             if (isImeRequested) MaterialTheme.colorScheme.primary
-            else MaterialTheme.colorScheme.onSurface,
-          modifier = Modifier.size(20.dp),
-        )
+            else MaterialTheme.colorScheme.outlineVariant,
+          modifier = Modifier.size(48.dp).testTag("btn_open_keyboard"),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.Keyboard,
+            contentDescription = "Open Mobile Keyboard",
+            tint =
+              if (isImeRequested) MaterialTheme.colorScheme.primary
+              else MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.size(20.dp),
+          )
+        }
       }
     }
   }

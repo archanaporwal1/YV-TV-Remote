@@ -7,7 +7,16 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.LiveTv
+import androidx.compose.material.icons.rounded.Movie
+import androidx.compose.material.icons.rounded.MusicNote
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.SportsSoccer
+import androidx.compose.material.icons.rounded.Tv
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -20,7 +29,12 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.remote.data.CustomOttIconStyle
 import com.example.remote.data.TvAppShortcut
 import kotlin.math.PI
 import kotlin.math.cos
@@ -154,22 +168,41 @@ fun OttAppIconTile(
   shortcut: TvAppShortcut,
   modifier: Modifier = Modifier,
 ) {
+  val isBuiltInBrand =
+    shortcut.id in
+      setOf(
+        "youtube",
+        "netflix",
+        "prime_video",
+        "jiocinema",
+        "hotstar",
+        "sonyliv",
+        "zee5",
+        "sunnxt",
+        "jiotv",
+      )
+
   val bgBrush =
-    when (shortcut.id) {
-      "youtube" -> Brush.linearGradient(listOf(Color(0xFFFFFFFF), Color(0xFFF3F4F6)))
-      "netflix" -> Brush.verticalGradient(listOf(Color(0xFF171717), Color(0xFF0A0A0A)))
-      "prime_video" -> Brush.linearGradient(listOf(Color(0xFF001F3F), Color(0xFF00539B)))
-      "jiocinema" -> Brush.linearGradient(listOf(Color(0xFFFF007F), Color(0xFF8C0052)))
-      "hotstar" -> Brush.linearGradient(listOf(Color(0xFF071330), Color(0xFF0D4484)))
-      "sonyliv" -> Brush.linearGradient(listOf(Color(0xFF1B153D), Color(0xFF0E0B22)))
-      "zee5" -> Brush.linearGradient(listOf(Color(0xFF140726), Color(0xFF090312)))
-      "sunnxt" -> Brush.linearGradient(listOf(Color(0xFFFF3B00), Color(0xFFFF9800)))
-      else -> Brush.linearGradient(listOf(Color(0xFFE60023), Color(0xFFA30019)))
+    when {
+      shortcut.id == "youtube" -> Brush.linearGradient(listOf(Color(0xFFFFFFFF), Color(0xFFF3F4F6)))
+      shortcut.id == "netflix" -> Brush.verticalGradient(listOf(Color(0xFF171717), Color(0xFF0A0A0A)))
+      shortcut.id == "prime_video" -> Brush.linearGradient(listOf(Color(0xFF001F3F), Color(0xFF00539B)))
+      shortcut.id == "jiocinema" -> Brush.linearGradient(listOf(Color(0xFFFF007F), Color(0xFF8C0052)))
+      shortcut.id == "hotstar" -> Brush.linearGradient(listOf(Color(0xFF071330), Color(0xFF0D4484)))
+      shortcut.id == "sonyliv" -> Brush.linearGradient(listOf(Color(0xFF1B153D), Color(0xFF0E0B22)))
+      shortcut.id == "zee5" -> Brush.linearGradient(listOf(Color(0xFF140726), Color(0xFF090312)))
+      shortcut.id == "sunnxt" -> Brush.linearGradient(listOf(Color(0xFFFF3B00), Color(0xFFFF9800)))
+      shortcut.id == "jiotv" -> Brush.linearGradient(listOf(Color(0xFFE60023), Color(0xFFA30019)))
+      else -> {
+        val top = lerp(shortcut.accentColor, Color.White, 0.16f)
+        val bottom = lerp(shortcut.accentColor, Color.Black, 0.36f)
+        Brush.linearGradient(listOf(top, bottom))
+      }
     }
 
   val borderColor =
     if (shortcut.id == "youtube") Color.White.copy(alpha = 0.65f)
-    else Color.White.copy(alpha = 0.18f)
+    else Color.White.copy(alpha = 0.20f)
 
   Surface(
     shape = RoundedCornerShape(12.dp),
@@ -186,7 +219,77 @@ fun OttAppIconTile(
           .padding(5.dp),
       contentAlignment = Alignment.Center,
     ) {
-      OttBrandMarkCanvas(id = shortcut.id, modifier = Modifier.fillMaxSize())
+      if (isBuiltInBrand && !shortcut.isCustom) {
+        OttBrandMarkCanvas(id = shortcut.id, modifier = Modifier.fillMaxSize())
+      } else {
+        CustomOttArtwork(shortcut = shortcut, modifier = Modifier.fillMaxSize())
+      }
+    }
+  }
+}
+
+@Composable
+private fun CustomOttArtwork(
+  shortcut: TvAppShortcut,
+  modifier: Modifier = Modifier,
+) {
+  val fgColor =
+    if (shortcut.accentColor.luminance() > 0.65f) Color(0xFF111318) else Color.White
+
+  Box(modifier = modifier, contentAlignment = Alignment.Center) {
+    when (shortcut.iconStyle) {
+      CustomOttIconStyle.BADGE -> {
+        Text(
+          text = shortcut.badge.take(3).ifEmpty { "TV" },
+          color = fgColor,
+          fontSize = if (shortcut.badge.length >= 3) 11.sp else 14.sp,
+          fontWeight = FontWeight.ExtraBold,
+          maxLines = 1,
+          softWrap = false,
+        )
+      }
+      CustomOttIconStyle.PLAY ->
+        Icon(
+          imageVector = Icons.Rounded.PlayArrow,
+          contentDescription = null,
+          tint = fgColor,
+          modifier = Modifier.fillMaxSize(0.86f),
+        )
+      CustomOttIconStyle.TV ->
+        Icon(
+          imageVector = Icons.Rounded.Tv,
+          contentDescription = null,
+          tint = fgColor,
+          modifier = Modifier.fillMaxSize(0.76f),
+        )
+      CustomOttIconStyle.MOVIE ->
+        Icon(
+          imageVector = Icons.Rounded.Movie,
+          contentDescription = null,
+          tint = fgColor,
+          modifier = Modifier.fillMaxSize(0.76f),
+        )
+      CustomOttIconStyle.SPORTS ->
+        Icon(
+          imageVector = Icons.Rounded.SportsSoccer,
+          contentDescription = null,
+          tint = fgColor,
+          modifier = Modifier.fillMaxSize(0.76f),
+        )
+      CustomOttIconStyle.MUSIC ->
+        Icon(
+          imageVector = Icons.Rounded.MusicNote,
+          contentDescription = null,
+          tint = fgColor,
+          modifier = Modifier.fillMaxSize(0.78f),
+        )
+      CustomOttIconStyle.LIVE ->
+        Icon(
+          imageVector = Icons.Rounded.LiveTv,
+          contentDescription = null,
+          tint = fgColor,
+          modifier = Modifier.fillMaxSize(0.76f),
+        )
     }
   }
 }

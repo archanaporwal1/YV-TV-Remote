@@ -247,7 +247,10 @@ fun ManualIpDialog(
       }
     },
     dismissButton = {
-      TextButton(onClick = onDismiss) {
+      TextButton(
+        onClick = onDismiss,
+        modifier = Modifier.testTag("manual_cancel_button"),
+      ) {
         Text("Cancel", maxLines = 1, softWrap = false)
       }
     },

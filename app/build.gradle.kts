@@ -13,12 +13,20 @@ android {
   namespace = "com.example"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
+  val ciVersionCode = (project.findProperty("APP_VERSION_CODE") as String?)?.toIntOrNull() ?: 1
+  val ciVersionName =
+    (project.findProperty("APP_VERSION_NAME") as String?)?.trim()?.takeIf { it.isNotEmpty() } ?: "1.0"
+  val ciReleaseRepo =
+    (project.findProperty("RELEASE_REPO") as String?)?.trim()?.replace("\"", "").orEmpty()
+
   defaultConfig {
     applicationId = "com.aistudio.yvtvremote.k8m3qx"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = ciVersionCode
+    versionName = ciVersionName
+
+    buildConfigField("String", "RELEASE_REPO", "\"$ciReleaseRepo\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -64,7 +72,17 @@ android {
     compose = true
     buildConfig = true
   }
-  testOptions { unitTests { isIncludeAndroidResources = true } }
+  testOptions {
+    unitTests {
+      isIncludeAndroidResources = true
+      all {
+        it.jvmArgs(
+          "--add-opens=java.base/java.net=ALL-UNNAMED",
+          "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED",
+        )
+      }
+    }
+  }
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true

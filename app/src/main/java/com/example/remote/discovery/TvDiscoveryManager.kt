@@ -31,7 +31,7 @@ data class DiscoveredTv(
 class TvDiscoveryManager(context: Context) {
 
   private val appContext = context.applicationContext
-  private val nsdManager = appContext.getSystemService(Context.NSD_SERVICE) as NsdManager
+  private val nsdManager = appContext.getSystemService(Context.NSD_SERVICE) as? NsdManager
   private val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
 
   private val _discoveredTvs = MutableStateFlow<List<DiscoveredTv>>(emptyList())
@@ -52,6 +52,11 @@ class TvDiscoveryManager(context: Context) {
   @Synchronized
   fun startScan() {
     if (_isScanning.value) return
+    val manager = nsdManager
+    if (manager == null) {
+      _scanError.value = "Network discovery service unavailable on this device. Use Manual IP."
+      return
+    }
     _scanError.value = null
     _discoveredTvs.value = emptyList()
 
@@ -59,7 +64,7 @@ class TvDiscoveryManager(context: Context) {
 
     val channel = Channel<NsdServiceInfo>(Channel.UNLIMITED)
     resolveQueueChannel = channel
-    val queuedServices = mutableSetOf<String>()
+    val queuedServices = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     resolveWorkerJob =
       scope.launch {
@@ -115,7 +120,7 @@ class TvDiscoveryManager(context: Context) {
 
     discoveryListener = listener
     try {
-      nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+      manager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
       _isScanning.value = true
     } catch (e: Exception) {
       _isScanning.value = false
@@ -132,7 +137,7 @@ class TvDiscoveryManager(context: Context) {
   private fun stopScanInternal() {
     discoveryListener?.let { listener ->
       try {
-        nsdManager.stopServiceDiscovery(listener)
+        nsdManager?.stopServiceDiscovery(listener)
       } catch (_: Exception) {
       }
     }
@@ -147,6 +152,7 @@ class TvDiscoveryManager(context: Context) {
 
   @Suppress("DEPRECATION")
   private suspend fun resolveSequentially(serviceInfo: NsdServiceInfo): DiscoveredTv? {
+    val manager = nsdManager ?: return null
     repeat(2) { attempt ->
       val result =
         withTimeoutOrNull(RESOLVE_TIMEOUT_MS) {
@@ -187,7 +193,7 @@ class TvDiscoveryManager(context: Context) {
               }
 
             try {
-              nsdManager.resolveService(serviceInfo, resolveListener)
+              manager.resolveService(serviceInfo, resolveListener)
             } catch (_: Exception) {
               if (completed.compareAndSet(false, true) && continuation.isActive) {
                 continuation.resume(false to null)

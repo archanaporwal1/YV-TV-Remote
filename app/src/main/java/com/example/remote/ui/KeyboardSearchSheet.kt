@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Backspace
 import androidx.compose.material.icons.automirrored.rounded.KeyboardReturn
 import androidx.compose.material.icons.rounded.Clear
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Search
@@ -77,16 +78,16 @@ fun KeyboardSearchSheet(
     }
   }
 
-  LaunchedEffect(Unit) {
-    focusRequester.requestFocus()
-  }
-
   ModalBottomSheet(
     onDismissRequest = onDismiss,
     sheetState = sheetState,
     containerColor = MaterialTheme.colorScheme.surface,
     contentColor = MaterialTheme.colorScheme.onSurface,
   ) {
+    LaunchedEffect(Unit) {
+      kotlinx.coroutines.delay(120L)
+      runCatching { focusRequester.requestFocus() }
+    }
     Column(
       modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 28.dp),
       verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -99,6 +100,7 @@ fun KeyboardSearchSheet(
         Row(
           verticalAlignment = Alignment.CenterVertically,
           horizontalArrangement = Arrangement.spacedBy(10.dp),
+          modifier = Modifier.weight(1f),
         ) {
           Icon(
             imageVector = Icons.Rounded.Keyboard,
@@ -121,6 +123,15 @@ fun KeyboardSearchSheet(
               color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
           }
+        }
+        IconButton(
+          onClick = onDismiss,
+          modifier = Modifier.size(48.dp).testTag("keyboard_close_button"),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.Close,
+            contentDescription = "Close Keyboard",
+          )
         }
       }
 

@@ -25,81 +25,78 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Prepare & Verify Keystore
+      - name: Prepare & Verify Permanent Keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           PASS="${KEYSTORE_PASSWORD:-TvRemotePermanent2026}"
-          ALIAS="${KEY_ALIAS:-tvremote}"
-          KEYPASS="${KEY_PASSWORD:-$PASS}"
 
-          VALID=false
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | tr -d ' \n\r' | base64 -d > my-upload-key.jks 2>/dev/null || true
-            if [ -s my-upload-key.jks ] && keytool -list -keystore my-upload-key.jks -storepass "$PASS" >/dev/null 2>&1; then
-              echo "Verified valid keystore from KEYSTORE_BASE64 secret."
-              VALID=true
-            else
-              echo "KEYSTORE_BASE64 was empty or corrupted. Regenerating a valid keystore..."
-              rm -f my-upload-key.jks
-            fi
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::KEYSTORE_BASE64 secret is missing! Add your permanent keystore base64 to GitHub Secrets."
+            exit 1
           fi
 
-          if [ "$VALID" = false ]; then
-            keytool -genkeypair -noprompt \
-              -keystore my-upload-key.jks \
-              -keyalg RSA -keysize 2048 -validity 36500 \
-              -alias "$ALIAS" \
-              -storepass "$PASS" \
-              -keypass "$KEYPASS" \
-              -dname "CN=SmartTVRemote, OU=Mobile, O=App, L=Hyderabad, S=Telangana, C=IN"
+          echo "$KEYSTORE_BASE64" | tr -d ' \n\r' | base64 -d > my-upload-key.jks
 
-            echo "=================================================================="
-            echo "COPY THIS CLEAN SINGLE-LINE KEYSTORE_BASE64 TO GITHUB SECRETS ONCE:"
-            base64 -w 0 my-upload-key.jks
-            echo ""
-            echo "=================================================================="
+          if [ ! -s my-upload-key.jks ]; then
+            echo "::error::Decoded my-upload-key.jks is empty. Check your KEYSTORE_BASE64 secret formatting."
+            exit 1
           fi
 
-      - name: Resolve Version Metadata
+          if ! keytool -list -keystore my-upload-key.jks -storepass "$PASS" >/dev/null 2>&1; then
+            echo "::error::Failed to unlock my-upload-key.jks! Verify that KEYSTORE_PASSWORD matches your keystore."
+            exit 1
+          fi
+
+          echo "Successfully verified permanent keystore from GitHub Secrets."
+
+      - name: Resolve & Patch Version Metadata in Gradle
         id: meta
         run: |
-          BASE_VER=$(grep -E '^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          BASE_VER=$(grep -E '^[[:space:]]*versionName[[:space:]]*=' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
           if [ -z "$BASE_VER" ]; then
             BASE_VER=$(grep -E 'val ciVersionName' -A1 app/build.gradle.kts | grep -oE '"[^"]+"' | tail -n 1 | tr -d '"' || true)
           fi
           BASE_VER=${BASE_VER:-1.0}
+
           DOT_COUNT=$(echo "$BASE_VER" | tr -cd '.' | wc -c)
           if [ "$DOT_COUNT" -ge 2 ]; then
             FINAL_VER="$BASE_VER"
           else
             FINAL_VER="${BASE_VER}.${{ github.run_number }}"
           fi
-          GRADLE_CODE=$(grep -E '^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*[0-9]+' app/build.gradle.kts | head -n 1 | grep -oE '[0-9]+' || true)
+
+          GRADLE_CODE=$(grep -E '^[[:space:]]*versionCode[[:space:]]*=' app/build.gradle.kts | head -n 1 | grep -oE '[0-9]+' || true)
           GRADLE_CODE=${GRADLE_CODE:-1}
+
           if [ "$GRADLE_CODE" -gt "${{ github.run_number }}" ]; then
             FINAL_CODE="$GRADLE_CODE"
           else
             FINAL_CODE="${{ github.run_number }}"
           fi
-          echo "version_name=$FINAL_VER" >> $GITHUB_OUTPUT
-          echo "version_code=$FINAL_CODE" >> $GITHUB_OUTPUT
-          echo "Resolved release version: v$FINAL_VER (code $FINAL_CODE)"
 
-      - name: Build Unsigned Release APK
-        run: |
+          # Force-patch versionCode and versionName directly inside app/build.gradle.kts for this CI build
+          sed -i -E "s/^([[:space:]]*versionCode[[:space:]]*=[[:space:]]*).*/\1${FINAL_CODE}/" app/build.gradle.kts
+          sed -i -E "s/^([[:space:]]*versionName[[:space:]]*=[[:space:]]*).*/\1\"${FINAL_VER}\"/" app/build.gradle.kts
+
+          # Strip any conflicting release signingConfig blocks so we sign cleanly with apksigner
           sed -i 's/signingConfig = signingConfigs.getByName("release")//g' app/build.gradle.kts || true
           sed -i 's/signingConfig signingConfigs.release//g' app/build.gradle.kts || true
           sed -i 's/signingConfig signingConfigs.getByName("release")//g' app/build.gradle.kts || true
+
+          echo "version_name=$FINAL_VER" >> $GITHUB_OUTPUT
+          echo "version_code=$FINAL_CODE" >> $GITHUB_OUTPUT
+          echo "Resolved & patched release version: v$FINAL_VER (versionCode=$FINAL_CODE)"
+
+      - name: Build Unsigned Release APK
+        run: |
           gradle assembleRelease \
             -PAPP_VERSION_CODE=${{ steps.meta.outputs.version_code }} \
             -PAPP_VERSION_NAME=${{ steps.meta.outputs.version_name }} \
             -PRELEASE_REPO=${{ github.repository }}
 
-      - name: Zipalign & Sign Release APK
+      - name: Zipalign, Sign & Verify Release APK
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -127,7 +124,11 @@ jobs:
             --out "$APK_FILE" \
             aligned.apk
 
-          $BUILD_TOOLS/apksigner verify --verbose "$APK_FILE"
+          echo "=== APK Signature & Certificate Verification ==="
+          $BUILD_TOOLS/apksigner verify --verbose --print-certs "$APK_FILE"
+
+          echo "=== APK Version Metadata Verification ==="
+          $BUILD_TOOLS/aapt dump badging "$APK_FILE" | grep -E "package:|sdkVersion:|targetSdkVersion:" || true
 
           RELEASE_NOTES=$(git log -1 --pretty=%s || echo "Automated release build")
           VER_CODE="$VER_CODE" VER_NAME="$VER_NAME" APK_FILE="$APK_FILE" REPO="${{ github.repository }}" RELEASE_NOTES="$RELEASE_NOTES" python3 -c '
@@ -138,8 +139,8 @@ jobs:
             "tag": "v" + os.environ["VER_NAME"],
             "title": "YV TV Remote v" + os.environ["VER_NAME"],
             "notes": os.environ["RELEASE_NOTES"] or ("Automated signed release build #" + os.environ["VER_CODE"]),
-            "apkUrl": "https://github.com/" + os.environ["REPO"] + "/releases/download/v" + os.environ["VER_NAME"] + "/" + os.environ["APK_FILE"],
-            "releaseUrl": "https://github.com/" + os.environ["REPO"] + "/releases/tag/v" + os.environ["VER_NAME"]
+            "apkUrl": "https://github.com" + os.environ["REPO"] + "/releases/download/v" + os.environ["VER_NAME"] + "/" + os.environ["APK_FILE"],
+            "releaseUrl": "https://github.com" + os.environ["REPO"] + "/releases/tag/v" + os.environ["VER_NAME"]
           }
           with open("update-manifest.json", "w") as f:
             json.dump(manifest, f, indent=2)

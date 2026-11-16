@@ -24,6 +24,8 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
 
       - name: Prepare & Verify Permanent Keystore
         env:
@@ -92,7 +94,7 @@ jobs:
           import java.net.*
           import kotlin.concurrent.thread
           object AutoAppUpdater {{
-              private const val URL_STR = "https://github.com{repo}/releases/latest/download/update-manifest.json"
+              private const val URL_STR = "https://github.com/{repo}/releases/latest/download/update-manifest.json"
               private var done = false
               @JvmStatic fun checkForUpdate(ctx: Context) {{
                   if (done) return; done = true
@@ -165,7 +167,7 @@ jobs:
           RELEASE_NOTES=$(git log -1 --pretty=%s || echo "Automated release build")
           VER_CODE="$VER_CODE" VER_NAME="$VER_NAME" APK_FILE="$APK_FILE" REPO="${{ github.repository }}" RELEASE_NOTES="$RELEASE_NOTES" python3 -c '
           import json, os
-          m = {"versionCode": int(os.environ["VER_CODE"]), "versionName": os.environ["VER_NAME"], "tag": "v" + os.environ["VER_NAME"], "title": "YV TV Remote v" + os.environ["VER_NAME"], "notes": os.environ["RELEASE_NOTES"], "apkUrl": "https://github.com" + os.environ["REPO"] + "/releases/download/v" + os.environ["VER_NAME"] + "/" + os.environ["APK_FILE"], "releaseUrl": "https://github.com" + os.environ["REPO"] + "/releases/tag/v" + os.environ["VER_NAME"]}
+          m = {"versionCode": int(os.environ["VER_CODE"]), "versionName": os.environ["VER_NAME"], "tag": "v" + os.environ["VER_NAME"], "title": "YV TV Remote v" + os.environ["VER_NAME"], "notes": os.environ["RELEASE_NOTES"], "apkUrl": "https://github.com/" + os.environ["REPO"] + "/releases/download/v" + os.environ["VER_NAME"] + "/" + os.environ["APK_FILE"], "releaseUrl": "https://github.com/" + os.environ["REPO"] + "/releases/tag/v" + os.environ["VER_NAME"]}
           open("update-manifest.json", "w").write(json.dumps(m, indent=2))
           '
 

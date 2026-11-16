@@ -385,12 +385,13 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
         showAddOttDialog = false
         customOttToEdit = null
       },
-      onSaveCustom = { name, appLink, badge, accentColor, iconStyle ->
+      onSaveCustom = { name, appLink, packageName, badge, accentColor, iconStyle ->
         if (editing != null) {
           viewModel.updateCustomOttShortcut(
             id = editing.id,
             name = name,
             appLink = appLink,
+            packageName = packageName,
             badge = badge,
             accentColor = accentColor,
             iconStyle = iconStyle,
@@ -399,6 +400,7 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
           viewModel.addCustomOttShortcut(
             name = name,
             appLink = appLink,
+            packageName = packageName,
             badge = badge,
             accentColor = accentColor,
             iconStyle = iconStyle,

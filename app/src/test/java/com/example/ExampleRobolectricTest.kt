@@ -266,6 +266,8 @@ class ExampleRobolectricTest {
         accentColor = androidx.compose.ui.graphics.Color(0xFFFA382F),
         isCustom = true,
         iconStyle = com.example.remote.data.CustomOttIconStyle.MOVIE,
+        packageNames = listOf("com.tubitv"),
+        nativeSchemes = listOf("tubitv://"),
       )
     val spotifyPreset =
       com.example.remote.data.TvAppShortcuts.popularAddableCatalog.first { it.id == "spotify" }
@@ -285,8 +287,188 @@ class ExampleRobolectricTest {
     assertEquals("Tubi", reloadedTubi.name)
     assertEquals("TB", reloadedTubi.badge)
     assertEquals("https://tubitv.com", reloadedTubi.appLink)
+    assertEquals(listOf("com.tubitv"), reloadedTubi.packageNames)
+    assertEquals(listOf("tubitv://"), reloadedTubi.nativeSchemes)
     assertEquals(com.example.remote.data.CustomOttIconStyle.MOVIE, reloadedTubi.iconStyle)
     assertTrue(loaded.enabledShortcuts().any { it.id == "custom_tubi" })
+  }
+
+  @Test
+  fun `built-in and custom OTT launch plans try native TV app intents before browser fallback`() {
+    com.example.remote.data.TvAppShortcuts.all.forEach { shortcut ->
+      val plan = com.example.remote.data.TvAppShortcuts.buildLaunchPlan(shortcut)
+      assertTrue(
+        "Expected native launch candidates for ${shortcut.name}",
+        plan.nativeCandidates.isNotEmpty(),
+      )
+      assertTrue(
+        "Expected Leanback launcher intent first for ${shortcut.name}",
+        plan.nativeCandidates.first().contains("LEANBACK_LAUNCHER"),
+      )
+      assertTrue(
+        "Native candidates must never trigger bare https:// browser links for ${shortcut.name}",
+        plan.nativeCandidates.none {
+          it.startsWith("http://") || it.startsWith("https://") || it.startsWith("market://")
+        },
+      )
+      assertEquals(shortcut.appLink, plan.browserFallback)
+    }
+
+    val customNoBrowserOnlyPkg =
+      com.example.remote.data.TvAppShortcut(
+        id = "custom_app",
+        name = "VLC",
+        badge = "VLC",
+        appLink = "market://details?id=org.videolan.vlc",
+        accentColor = androidx.compose.ui.graphics.Color(0xFFFF8800),
+        isCustom = true,
+        packageNames = listOf("org.videolan.vlc"),
+      )
+    val customPlan = com.example.remote.data.TvAppShortcuts.buildLaunchPlan(customNoBrowserOnlyPkg)
+    assertTrue(customPlan.nativeCandidates.any { it.contains("package=org.videolan.vlc") })
+    assertEquals("https://play.google.com/store/apps/details?id=org.videolan.vlc", customPlan.browserFallback)
+  }
+
+  @Test
+  fun `launchAppWithPlan opens installed native app without browser fallback, and falls back to browser only on RemoteError`() {
+    kotlinx.coroutines.runBlocking {
+      val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+      val certManager = CertificateManager(app)
+      val serverKeyStore = certManager.ensureClientIdentity()
+      val kmf =
+        javax.net.ssl.KeyManagerFactory.getInstance(
+          javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
+        ).apply {
+          init(serverKeyStore, "yvtv_remote_keystore_pass".toCharArray())
+        }
+      val trustAll =
+        object : javax.net.ssl.X509TrustManager {
+          override fun checkClientTrusted(
+            chain: Array<out java.security.cert.X509Certificate>?,
+            authType: String?,
+          ) {}
+
+          override fun checkServerTrusted(
+            chain: Array<out java.security.cert.X509Certificate>?,
+            authType: String?,
+          ) {}
+
+          override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+        }
+      val serverSslContext =
+        javax.net.ssl.SSLContext.getInstance("TLS").apply {
+          init(kmf.keyManagers, arrayOf<javax.net.ssl.TrustManager>(trustAll), null)
+        }
+      val serverSocket =
+        (serverSslContext.serverSocketFactory.createServerSocket(0) as javax.net.ssl.SSLServerSocket)
+          .apply {
+            needClientAuth = false
+          }
+
+      val installedReceivedLinks = java.util.Collections.synchronizedList(mutableListOf<String>())
+      val missingReceivedLinks = java.util.Collections.synchronizedList(mutableListOf<String>())
+      val browserFallbackReceivedLatch = java.util.concurrent.CountDownLatch(1)
+      val acceptIndex = java.util.concurrent.atomic.AtomicInteger(0)
+
+      val youtube = com.example.remote.data.TvAppShortcuts.all.first { it.id == "youtube" }
+      val plan = com.example.remote.data.TvAppShortcuts.buildLaunchPlan(youtube)
+
+      val serverThread =
+        Thread {
+          try {
+            while (!serverSocket.isClosed && acceptIndex.get() < 2) {
+              val client = serverSocket.accept() as javax.net.ssl.SSLSocket
+              val connectionNum = acceptIndex.incrementAndGet()
+              client.startHandshake()
+              val configureMsg =
+                com.example.proto.remote.RemoteMessage.newBuilder()
+                  .setRemoteConfigure(
+                    com.example.proto.remote.RemoteConfigure.newBuilder()
+                      .setCode1(622)
+                      .build()
+                  )
+                  .build()
+              com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, configureMsg)
+
+              val input = client.inputStream
+              while (!client.isClosed) {
+                val frame = com.example.remote.protocol.DelimitedStreamHelper.readDelimitedBytes(input) ?: break
+                val msg = com.example.proto.remote.RemoteMessage.parseFrom(frame)
+                if (msg.hasRemoteAppLinkLaunchRequest()) {
+                  val requestedLink = msg.remoteAppLinkLaunchRequest.appLink
+                  if (connectionNum == 1) {
+                    // Simulate app installed: TV accepts native candidate silently
+                    installedReceivedLinks.add(requestedLink)
+                  } else {
+                    // Simulate app missing: reject every non-http native candidate with RemoteError
+                    missingReceivedLinks.add(requestedLink)
+                    if (!requestedLink.startsWith("https://")) {
+                      val errorReply =
+                        com.example.proto.remote.RemoteMessage.newBuilder()
+                          .setRemoteError(
+                            com.example.proto.remote.RemoteError.newBuilder()
+                              .setValue(true)
+                              .setMessage(msg)
+                              .build()
+                          )
+                          .build()
+                      com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, errorReply)
+                    } else {
+                      browserFallbackReceivedLatch.countDown()
+                    }
+                  }
+                }
+              }
+              client.close()
+            }
+          } catch (_: Throwable) {
+          } finally {
+            try {
+              serverSocket.close()
+            } catch (_: Exception) {
+            }
+          }
+        }.apply { start() }
+
+      val client = com.example.remote.protocol.RemoteControlClient(certManager)
+
+      // Connection 1: app IS installed -> must launch natively and NEVER send browser fallback
+      client.connect("127.0.0.1", serverSocket.localPort)
+      var deadline = System.currentTimeMillis() + 5_000L
+      while (System.currentTimeMillis() < deadline && !client.isConnectionHealthy()) {
+        kotlinx.coroutines.delay(20L)
+      }
+      assertTrue("Expected first connection to be healthy", client.isConnectionHealthy())
+
+      val installedOutcome = client.launchAppWithPlan(plan, errorWaitMs = 150L)
+      assertEquals(com.example.remote.protocol.OttLaunchOutcome.LAUNCHED_NATIVE_APP, installedOutcome)
+      assertEquals(1, installedReceivedLinks.size)
+      assertTrue(installedReceivedLinks.first().startsWith("intent:#Intent;"))
+      assertTrue(installedReceivedLinks.none { it.startsWith("https://") })
+      assertTrue("Session must stay healthy after native launch", client.isConnectionHealthy())
+      client.disconnect()
+
+      // Connection 2: app is NOT installed -> must survive RemoteErrors and fall back to TV browser
+      client.connect("127.0.0.1", serverSocket.localPort)
+      deadline = System.currentTimeMillis() + 5_000L
+      while (System.currentTimeMillis() < deadline && !client.isConnectionHealthy()) {
+        kotlinx.coroutines.delay(20L)
+      }
+      assertTrue("Expected second connection to be healthy", client.isConnectionHealthy())
+
+      val fallbackOutcome = client.launchAppWithPlan(plan, errorWaitMs = 150L)
+      assertEquals(com.example.remote.protocol.OttLaunchOutcome.OPENED_IN_BROWSER, fallbackOutcome)
+      assertTrue(
+        "Expected server to receive browser fallback URL",
+        browserFallbackReceivedLatch.await(2, java.util.concurrent.TimeUnit.SECONDS),
+      )
+      assertEquals(plan.nativeCandidates.size + 1, missingReceivedLinks.size)
+      assertEquals(plan.browserFallback, missingReceivedLinks.last())
+      assertTrue("Non-fatal RemoteError for missing app must keep session connected", client.isConnectionHealthy())
+
+      client.disconnect()
+      serverThread.join(1_500L)
+    }
   }
 
   @Test
@@ -422,6 +604,255 @@ class ExampleRobolectricTest {
       viewModel.uiState.value.connectionStatus,
     )
 
+    serverThread.join(1_500L)
+  }
+
+  @Test
+  fun `keepalive ping keeps live connection healthy past stale threshold and detects unresponsive half-open TV`() {
+    kotlinx.coroutines.runBlocking {
+      val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+      val certManager = CertificateManager(app)
+      val serverKeyStore = certManager.ensureClientIdentity()
+      val kmf =
+        javax.net.ssl.KeyManagerFactory.getInstance(
+          javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
+        ).apply {
+          init(serverKeyStore, "yvtv_remote_keystore_pass".toCharArray())
+        }
+      val trustAll =
+        object : javax.net.ssl.X509TrustManager {
+          override fun checkClientTrusted(
+            chain: Array<out java.security.cert.X509Certificate>?,
+            authType: String?,
+          ) {}
+
+          override fun checkServerTrusted(
+            chain: Array<out java.security.cert.X509Certificate>?,
+            authType: String?,
+          ) {}
+
+          override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+        }
+      val serverSslContext =
+        javax.net.ssl.SSLContext.getInstance("TLS").apply {
+          init(kmf.keyManagers, arrayOf<javax.net.ssl.TrustManager>(trustAll), null)
+        }
+      val serverSocket =
+        (serverSslContext.serverSocketFactory.createServerSocket(0) as javax.net.ssl.SSLServerSocket)
+          .apply {
+            needClientAuth = false
+          }
+
+      val pingCount = java.util.concurrent.atomic.AtomicInteger(0)
+      val stopAnsweringPings = java.util.concurrent.atomic.AtomicBoolean(false)
+
+      val serverThread =
+        Thread {
+          try {
+            val client = serverSocket.accept() as javax.net.ssl.SSLSocket
+            client.startHandshake()
+            val configureMsg =
+              com.example.proto.remote.RemoteMessage.newBuilder()
+                .setRemoteConfigure(
+                  com.example.proto.remote.RemoteConfigure.newBuilder()
+                    .setCode1(622)
+                    .build()
+                )
+                .build()
+            com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, configureMsg)
+
+            val input = client.inputStream
+            while (!client.isClosed) {
+              val frame = com.example.remote.protocol.DelimitedStreamHelper.readDelimitedBytes(input) ?: break
+              val msg = com.example.proto.remote.RemoteMessage.parseFrom(frame)
+              if (msg.hasRemotePingRequest()) {
+                pingCount.incrementAndGet()
+                if (!stopAnsweringPings.get()) {
+                  val pong =
+                    com.example.proto.remote.RemoteMessage.newBuilder()
+                      .setRemotePingResponse(
+                        com.example.proto.remote.RemotePingResponse.newBuilder()
+                          .setVal1(msg.remotePingRequest.val1)
+                          .build()
+                      )
+                      .build()
+                  com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, pong)
+                }
+              }
+            }
+            client.close()
+          } catch (_: Throwable) {
+          } finally {
+            try {
+              serverSocket.close()
+            } catch (_: Exception) {
+            }
+          }
+        }.apply { start() }
+
+      val client =
+        com.example.remote.protocol.RemoteControlClient(
+          certificateManager = certManager,
+          keepaliveIntervalMs = 80L,
+          socketReadTimeoutMs = 180,
+          staleConnectionTimeoutMs = 350L,
+        )
+
+      client.connect("127.0.0.1", serverSocket.localPort)
+      val connectDeadline = System.currentTimeMillis() + 5_000L
+      while (System.currentTimeMillis() < connectDeadline && !client.isConnectionHealthy()) {
+        kotlinx.coroutines.delay(20L)
+      }
+      assertTrue("Expected Connected state", client.isConnectionHealthy())
+
+      // Wait longer than staleConnectionTimeoutMs (350ms) while pings are answered -> must stay healthy
+      kotlinx.coroutines.delay(550L)
+      assertTrue("Ping-pong keepalive should keep connection alive", client.isConnectionHealthy())
+      assertTrue("Expected multiple keepalive pings sent, got ${pingCount.get()}", pingCount.get() >= 3)
+
+      // Now simulate a silent half-open TV that stops responding -> client must detect ConnectionLost
+      stopAnsweringPings.set(true)
+      val staleDeadline = System.currentTimeMillis() + 3_000L
+      var detectedConnectionLost = false
+      while (System.currentTimeMillis() < staleDeadline) {
+        if (client.sessionEvent.value is com.example.remote.protocol.RemoteControlClient.SessionEvent.ConnectionLost) {
+          detectedConnectionLost = true
+          break
+        }
+        kotlinx.coroutines.delay(25L)
+      }
+      assertTrue(
+        "Expected ConnectionLost when TV stops answering heartbeats, got ${client.sessionEvent.value}",
+        detectedConnectionLost,
+      )
+
+      client.disconnect()
+      serverThread.join(1_500L)
+    }
+  }
+
+  @Test
+  fun `viewModel automatically retries and recovers after foreground connection loss without stalling on Error`() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val certManager = CertificateManager(app)
+    val serverKeyStore = certManager.ensureClientIdentity()
+    val kmf =
+      javax.net.ssl.KeyManagerFactory.getInstance(
+        javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
+      ).apply {
+        init(serverKeyStore, "yvtv_remote_keystore_pass".toCharArray())
+      }
+    val trustAll =
+      object : javax.net.ssl.X509TrustManager {
+        override fun checkClientTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+
+        override fun checkServerTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+
+        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+      }
+    val serverSslContext =
+      javax.net.ssl.SSLContext.getInstance("TLS").apply {
+        init(kmf.keyManagers, arrayOf<javax.net.ssl.TrustManager>(trustAll), null)
+      }
+    val serverSocket =
+      (serverSslContext.serverSocketFactory.createServerSocket(0) as javax.net.ssl.SSLServerSocket)
+        .apply {
+          needClientAuth = false
+        }
+
+    val acceptCount = java.util.concurrent.atomic.AtomicInteger(0)
+    val recoveredLatch = java.util.concurrent.CountDownLatch(1)
+
+    val serverThread =
+      Thread {
+        try {
+          while (!serverSocket.isClosed && acceptCount.get() < 3) {
+            val client = serverSocket.accept() as javax.net.ssl.SSLSocket
+            val attempt = acceptCount.incrementAndGet()
+            client.startHandshake()
+            if (attempt == 1) {
+              // Initial connect succeeds then drops unexpectedly while user is still in foreground
+              val configureMsg =
+                com.example.proto.remote.RemoteMessage.newBuilder()
+                  .setRemoteConfigure(
+                    com.example.proto.remote.RemoteConfigure.newBuilder()
+                      .setCode1(622)
+                      .build()
+                  )
+                  .build()
+              com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, configureMsg)
+              Thread.sleep(250L)
+              client.close()
+            } else if (attempt == 2) {
+              // First reconnect attempt fails with a transient RemoteError -> verifies Error retry path
+              val errMsg =
+                com.example.proto.remote.RemoteMessage.newBuilder()
+                  .setRemoteError(
+                    com.example.proto.remote.RemoteError.newBuilder()
+                      .setValue(true)
+                      .build()
+                  )
+                  .build()
+              com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, errMsg)
+              Thread.sleep(50L)
+              client.close()
+            } else {
+              // Subsequent reconnect attempt succeeds
+              val configureMsg =
+                com.example.proto.remote.RemoteMessage.newBuilder()
+                  .setRemoteConfigure(
+                    com.example.proto.remote.RemoteConfigure.newBuilder()
+                      .setCode1(622)
+                      .build()
+                  )
+                  .build()
+              com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, configureMsg)
+              recoveredLatch.countDown()
+              Thread.sleep(600L)
+              client.close()
+            }
+          }
+        } catch (_: Throwable) {
+        } finally {
+          try {
+            serverSocket.close()
+          } catch (_: Exception) {
+          }
+        }
+      }.apply { start() }
+
+    fun pumpMainLooperUntil(timeoutMs: Long = 8_000L, condition: () -> Boolean): Boolean {
+      val mainLooperShadow = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+      val deadline = System.currentTimeMillis() + timeoutMs
+      while (System.currentTimeMillis() < deadline) {
+        mainLooperShadow.idle()
+        if (condition()) return true
+        Thread.sleep(25L)
+        mainLooperShadow.idleFor(java.time.Duration.ofMillis(25))
+      }
+      mainLooperShadow.idle()
+      return condition()
+    }
+
+    val viewModel = com.example.remote.ui.RemoteViewModel(app)
+    viewModel.connectManualIp("127.0.0.1", serverSocket.localPort, "Living Room TV")
+
+    assertTrue(
+      "Expected recovery after foreground disconnect & transient failure (attempts=${acceptCount.get()}, status=${viewModel.uiState.value.connectionStatus})",
+      pumpMainLooperUntil {
+        recoveredLatch.count == 0L &&
+          viewModel.uiState.value.connectionStatus is com.example.remote.ui.ConnectionStatus.Connected
+      },
+    )
+
+    viewModel.disconnect()
+    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
     serverThread.join(1_500L)
   }
 }

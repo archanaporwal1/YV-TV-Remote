@@ -71,12 +71,15 @@ fun AddOrEditOttShortcutDialog(
   editingShortcut: TvAppShortcut?,
   alreadyAddedIds: Set<String>,
   onQuickAddPopular: (TvAppShortcut) -> Unit,
-  onSaveCustom: (name: String, appLink: String, badge: String, accentColor: Color, iconStyle: CustomOttIconStyle) -> Unit,
+  onSaveCustom: (name: String, appLink: String, packageName: String, badge: String, accentColor: Color, iconStyle: CustomOttIconStyle) -> Unit,
   onDismiss: () -> Unit,
 ) {
   val isEditing = editingShortcut != null
   var name by remember(editingShortcut) { mutableStateOf(editingShortcut?.name ?: "") }
   var appLink by remember(editingShortcut) { mutableStateOf(editingShortcut?.appLink ?: "") }
+  var packageName by remember(editingShortcut) {
+    mutableStateOf(editingShortcut?.packageNames?.firstOrNull() ?: "")
+  }
   var badge by remember(editingShortcut) { mutableStateOf(editingShortcut?.badge ?: "") }
   var badgeManuallyEdited by remember(editingShortcut) { mutableStateOf(editingShortcut != null) }
   var selectedColor by remember(editingShortcut) {
@@ -94,9 +97,12 @@ fun AddOrEditOttShortcutDialog(
 
   val effectiveBadge =
     badge.trim().ifEmpty { TvAppShortcuts.suggestBadge(name.ifBlank { "TV" }) }.take(3)
-  val normalizedPreviewLink = remember(appLink) { TvAppShortcuts.normalizeAppLink(appLink) }
+  val normalizedPreviewLink =
+    remember(appLink, packageName) {
+      TvAppShortcuts.normalizeAppLink(appLink.ifBlank { packageName })
+    }
   val previewShortcut =
-    remember(name, effectiveBadge, normalizedPreviewLink, selectedColor, selectedStyle) {
+    remember(name, effectiveBadge, normalizedPreviewLink, packageName, selectedColor, selectedStyle) {
       TvAppShortcut(
         id = editingShortcut?.id ?: "preview_custom",
         name = name.ifBlank { "Custom App" },
@@ -105,6 +111,7 @@ fun AddOrEditOttShortcutDialog(
         accentColor = selectedColor,
         isCustom = true,
         iconStyle = selectedStyle,
+        packageNames = listOfNotNull(packageName.trim().takeIf { it.isNotEmpty() }),
       )
     }
 
@@ -270,16 +277,38 @@ fun AddOrEditOttShortcutDialog(
           OutlinedTextField(
             value = appLink,
             onValueChange = { appLink = it },
-            label = { Text("Launch URL or TV Package ID") },
-            placeholder = { Text("e.g. tubitv.com or com.tubitv") },
+            label = { Text("App URL or Web Fallback") },
+            placeholder = { Text("e.g. tubitv.com or https://tv.apple.com") },
             supportingText =
               if (normalizedPreviewLink.isNotEmpty()) {
-                { Text("TV Launch URI: $normalizedPreviewLink", maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                {
+                  Text(
+                    "Browser fallback: $normalizedPreviewLink",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                  )
+                }
               } else {
                 null
               },
             singleLine = true,
             modifier = Modifier.fillMaxWidth().testTag("ott_link_input"),
+          )
+
+          OutlinedTextField(
+            value = packageName,
+            onValueChange = { packageName = it },
+            label = { Text("TV Package ID (Optional)") },
+            placeholder = { Text("e.g. com.tubitv — opens installed app first") },
+            supportingText = {
+              Text(
+                "Opens installed TV app first; falls back to browser only if missing",
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+              )
+            },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().testTag("ott_package_input"),
           )
 
           // Accent Color Swatches
@@ -402,12 +431,13 @@ fun AddOrEditOttShortcutDialog(
               onSaveCustom(
                 name.trim(),
                 appLink.trim(),
+                packageName.trim(),
                 effectiveBadge,
                 selectedColor,
                 selectedStyle,
               )
             },
-            enabled = name.isNotBlank() && appLink.isNotBlank(),
+            enabled = name.isNotBlank() && (appLink.isNotBlank() || packageName.isNotBlank()),
             modifier = Modifier.weight(1f).height(48.dp).testTag("ott_save_button"),
           ) {
             Text(

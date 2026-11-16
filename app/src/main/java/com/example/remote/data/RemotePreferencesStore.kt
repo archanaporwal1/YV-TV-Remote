@@ -308,6 +308,25 @@ class RemotePreferencesStore(context: Context) {
                   item.optString("badge").trim().ifEmpty { TvAppShortcuts.suggestBadge(name) }.take(3)
                 val colorArgb = item.optLong("accentColorArgb", 0xFF00B4D8L).toInt()
                 val iconStyle = CustomOttIconStyle.fromKey(item.optString("iconStyle", "badge"))
+                val storedPackages =
+                  item.optJSONArray("packageNames")?.let { pkgArr ->
+                    buildList {
+                      for (j in 0 until pkgArr.length()) {
+                        val pkg = pkgArr.optString(j).trim()
+                        if (pkg.isNotEmpty()) add(pkg)
+                      }
+                    }
+                  }.orEmpty()
+                val storedSchemes =
+                  item.optJSONArray("nativeSchemes")?.let { schemeArr ->
+                    buildList {
+                      for (j in 0 until schemeArr.length()) {
+                        val scheme = schemeArr.optString(j).trim()
+                        if (scheme.isNotEmpty()) add(scheme)
+                      }
+                    }
+                  }.orEmpty()
+                val presetMeta = TvAppShortcuts.findMetadataPreset(id)
                 add(
                   TvAppShortcut(
                     id = id,
@@ -317,6 +336,8 @@ class RemotePreferencesStore(context: Context) {
                     accentColor = Color(colorArgb),
                     isCustom = true,
                     iconStyle = iconStyle,
+                    packageNames = storedPackages.ifEmpty { presetMeta?.packageNames.orEmpty() },
+                    nativeSchemes = storedSchemes.ifEmpty { presetMeta?.nativeSchemes.orEmpty() },
                   )
                 )
               }
@@ -385,6 +406,16 @@ class RemotePreferencesStore(context: Context) {
               put("appLink", shortcut.appLink)
               put("accentColorArgb", shortcut.accentColor.toArgb().toLong())
               put("iconStyle", shortcut.iconStyle.key)
+              if (shortcut.packageNames.isNotEmpty()) {
+                val pkgArr = JSONArray()
+                shortcut.packageNames.forEach { pkgArr.put(it) }
+                put("packageNames", pkgArr)
+              }
+              if (shortcut.nativeSchemes.isNotEmpty()) {
+                val schemeArr = JSONArray()
+                shortcut.nativeSchemes.forEach { schemeArr.put(it) }
+                put("nativeSchemes", schemeArr)
+              }
             }
           )
         }

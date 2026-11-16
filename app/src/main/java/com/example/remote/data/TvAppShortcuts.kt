@@ -1,5 +1,6 @@
 package com.example.remote.data
 
+import android.net.Uri
 import androidx.compose.ui.graphics.Color
 
 enum class CustomOttIconStyle(
@@ -28,6 +29,13 @@ data class TvAppShortcut(
   val accentColor: Color,
   val isCustom: Boolean = false,
   val iconStyle: CustomOttIconStyle = CustomOttIconStyle.BADGE,
+  val packageNames: List<String> = emptyList(),
+  val nativeSchemes: List<String> = emptyList(),
+)
+
+data class OttLaunchPlan(
+  val nativeCandidates: List<String>,
+  val browserFallback: String?,
 )
 
 object TvAppShortcuts {
@@ -39,6 +47,13 @@ object TvAppShortcuts {
         badge = "YT",
         appLink = "https://www.youtube.com",
         accentColor = Color(0xFFFF3B30),
+        packageNames =
+          listOf(
+            "com.google.android.youtube.tv",
+            "com.google.android.youtube.googletv",
+            "com.google.android.youtube",
+          ),
+        nativeSchemes = listOf("vnd.youtube://"),
       ),
       TvAppShortcut(
         id = "netflix",
@@ -46,6 +61,12 @@ object TvAppShortcuts {
         badge = "NF",
         appLink = "https://www.netflix.com",
         accentColor = Color(0xFFE50914),
+        packageNames =
+          listOf(
+            "com.netflix.ninja",
+            "com.netflix.mediaclient",
+          ),
+        nativeSchemes = listOf("nflx://www.netflix.com/", "netflix://"),
       ),
       TvAppShortcut(
         id = "prime_video",
@@ -53,6 +74,12 @@ object TvAppShortcuts {
         badge = "PV",
         appLink = "https://app.primevideo.com",
         accentColor = Color(0xFF00A8E1),
+        packageNames =
+          listOf(
+            "com.amazon.amazonvideo.livingroom",
+            "com.amazon.avod.thirdpartyclient",
+          ),
+        nativeSchemes = listOf("primevideo://"),
       ),
       TvAppShortcut(
         id = "jiocinema",
@@ -60,6 +87,12 @@ object TvAppShortcuts {
         badge = "JC",
         appLink = "https://www.jiocinema.com",
         accentColor = Color(0xFFD9008D),
+        packageNames =
+          listOf(
+            "com.jio.media.stb.ondemand",
+            "com.jio.media.ondemand",
+          ),
+        nativeSchemes = listOf("jiocinema://"),
       ),
       TvAppShortcut(
         id = "hotstar",
@@ -67,6 +100,14 @@ object TvAppShortcuts {
         badge = "HS",
         appLink = "https://www.hotstar.com",
         accentColor = Color(0xFF1F80E0),
+        packageNames =
+          listOf(
+            "in.startv.hotstar.dplus.tv",
+            "in.startv.hotstartvonly",
+            "in.startv.hotstar",
+            "com.hotstar.disney",
+          ),
+        nativeSchemes = listOf("hotstar://"),
       ),
       TvAppShortcut(
         id = "sonyliv",
@@ -74,6 +115,8 @@ object TvAppShortcuts {
         badge = "SL",
         appLink = "https://www.sonyliv.com",
         accentColor = Color(0xFFF5A623),
+        packageNames = listOf("com.sonyliv"),
+        nativeSchemes = listOf("sonyliv://"),
       ),
       TvAppShortcut(
         id = "zee5",
@@ -81,6 +124,8 @@ object TvAppShortcuts {
         badge = "Z5",
         appLink = "https://www.zee5.com",
         accentColor = Color(0xFFA259FF),
+        packageNames = listOf("com.graymatrix.did"),
+        nativeSchemes = listOf("zee5://"),
       ),
       TvAppShortcut(
         id = "sunnxt",
@@ -88,6 +133,8 @@ object TvAppShortcuts {
         badge = "SN",
         appLink = "https://www.sunnxt.com",
         accentColor = Color(0xFFFF7A00),
+        packageNames = listOf("com.suntv.sunnxt"),
+        nativeSchemes = listOf("sunnxt://"),
       ),
       TvAppShortcut(
         id = "jiotv",
@@ -95,6 +142,12 @@ object TvAppShortcuts {
         badge = "JT",
         appLink = "https://jiotv.com",
         accentColor = Color(0xFF0A66C2),
+        packageNames =
+          listOf(
+            "com.jio.media.jiotvplus",
+            "com.jio.jioplay.tv",
+          ),
+        nativeSchemes = listOf("jiotv://"),
       ),
     )
 
@@ -122,6 +175,12 @@ object TvAppShortcuts {
         accentColor = Color(0xFF4B5563),
         isCustom = true,
         iconStyle = CustomOttIconStyle.TV,
+        packageNames =
+          listOf(
+            "com.apple.atve.androidtv.appletv",
+            "com.apple.atve.sony.appletv",
+          ),
+        nativeSchemes = listOf("appletv://"),
       ),
       TvAppShortcut(
         id = "spotify",
@@ -131,6 +190,12 @@ object TvAppShortcuts {
         accentColor = Color(0xFF1DB954),
         isCustom = true,
         iconStyle = CustomOttIconStyle.MUSIC,
+        packageNames =
+          listOf(
+            "com.spotify.tv.android",
+            "com.spotify.music",
+          ),
+        nativeSchemes = listOf("spotify://"),
       ),
       TvAppShortcut(
         id = "twitch",
@@ -140,6 +205,8 @@ object TvAppShortcuts {
         accentColor = Color(0xFF9146FF),
         isCustom = true,
         iconStyle = CustomOttIconStyle.LIVE,
+        packageNames = listOf("tv.twitch.android.app"),
+        nativeSchemes = listOf("twitch://home"),
       ),
       TvAppShortcut(
         id = "plex",
@@ -149,6 +216,8 @@ object TvAppShortcuts {
         accentColor = Color(0xFFE5A00D),
         isCustom = true,
         iconStyle = CustomOttIconStyle.PLAY,
+        packageNames = listOf("com.plexapp.android"),
+        nativeSchemes = listOf("plex://"),
       ),
       TvAppShortcut(
         id = "crunchyroll",
@@ -158,6 +227,8 @@ object TvAppShortcuts {
         accentColor = Color(0xFFF47521),
         isCustom = true,
         iconStyle = CustomOttIconStyle.PLAY,
+        packageNames = listOf("com.crunchyroll.crunchyroid"),
+        nativeSchemes = listOf("crunchyroll://"),
       ),
       TvAppShortcut(
         id = "discovery_plus",
@@ -167,6 +238,12 @@ object TvAppShortcuts {
         accentColor = Color(0xFF0077B6),
         isCustom = true,
         iconStyle = CustomOttIconStyle.TV,
+        packageNames =
+          listOf(
+            "com.discovery.discoveryplus.androidtv",
+            "com.discovery.discoveryplus.in",
+          ),
+        nativeSchemes = listOf("discoveryplus://"),
       ),
       TvAppShortcut(
         id = "fancode",
@@ -176,6 +253,12 @@ object TvAppShortcuts {
         accentColor = Color(0xFFEF4444),
         isCustom = true,
         iconStyle = CustomOttIconStyle.SPORTS,
+        packageNames =
+          listOf(
+            "com.fancode.tv",
+            "com.dream11sportsguru",
+          ),
+        nativeSchemes = listOf("fancode://"),
       ),
       TvAppShortcut(
         id = "mx_player",
@@ -185,6 +268,12 @@ object TvAppShortcuts {
         accentColor = Color(0xFF2563EB),
         isCustom = true,
         iconStyle = CustomOttIconStyle.PLAY,
+        packageNames =
+          listOf(
+            "com.mxtech.videoplayer.television",
+            "com.mxtech.videoplayer.ad",
+          ),
+        nativeSchemes = listOf("mxplayer://"),
       ),
       TvAppShortcut(
         id = "aha",
@@ -194,6 +283,12 @@ object TvAppShortcuts {
         accentColor = Color(0xFFFF6D00),
         isCustom = true,
         iconStyle = CustomOttIconStyle.MOVIE,
+        packageNames =
+          listOf(
+            "ahaflix.tv",
+            "com.aha.video.telugu",
+          ),
+        nativeSchemes = listOf("aha://"),
       ),
       TvAppShortcut(
         id = "hoichoi",
@@ -203,6 +298,12 @@ object TvAppShortcuts {
         accentColor = Color(0xFFE11D48),
         isCustom = true,
         iconStyle = CustomOttIconStyle.MOVIE,
+        packageNames =
+          listOf(
+            "com.viewlift.hoichoi",
+            "com.hoichoi.tv.android",
+          ),
+        nativeSchemes = listOf("hoichoi://"),
       ),
       TvAppShortcut(
         id = "max",
@@ -212,6 +313,8 @@ object TvAppShortcuts {
         accentColor = Color(0xFF002BE7),
         isCustom = true,
         iconStyle = CustomOttIconStyle.MOVIE,
+        packageNames = listOf("com.wbd.stream"),
+        nativeSchemes = listOf("max://"),
       ),
       TvAppShortcut(
         id = "hulu",
@@ -221,11 +324,47 @@ object TvAppShortcuts {
         accentColor = Color(0xFF1CE783),
         isCustom = true,
         iconStyle = CustomOttIconStyle.LIVE,
+        packageNames =
+          listOf(
+            "com.hulu.livingroomplus",
+            "com.hulu.plus",
+          ),
+        nativeSchemes = listOf("hulu://"),
       ),
     )
 
+  private val domainToKnownPackages: Map<String, Pair<List<String>, List<String>>> =
+    buildMap {
+      (all + popularAddableCatalog).forEach { shortcut ->
+        val host = extractHost(shortcut.appLink)
+        if (host.isNotEmpty()) {
+          put(host, shortcut.packageNames to shortcut.nativeSchemes)
+        }
+      }
+      put("tubitv.com", listOf("com.tubitv") to listOf("tubitv://"))
+      put("pluto.tv", listOf("tv.pluto.android") to listOf("plutotv://"))
+      put("vimeo.com", listOf("com.vimeo.android.videoapp") to listOf("vimeo://"))
+      put("dailymotion.com", listOf("com.dailymotion.dailymotion") to listOf("dailymotion://"))
+      put("viki.com", listOf("com.viki.android") to listOf("viki://"))
+      put("erosnow.com", listOf("com.erosnow") to listOf("erosnow://"))
+      put("altbalaji.com", listOf("com.balaji.alt") to listOf("altbalaji://"))
+      put("lionsgateplay.com", listOf("com.lionsgateplay.videoapp") to emptyList())
+      put("kodi.tv", listOf("org.xbmc.kodi") to listOf("kodi://"))
+    }
+
   private val reverseDnsPrefixes = setOf("com", "org", "net", "tv", "in", "de", "uk", "jp", "io")
   private val webTlds = setOf("com", "org", "net", "tv", "in", "io", "co", "app", "video", "live", "watch", "me")
+
+  fun findMetadataPreset(id: String): TvAppShortcut? =
+    all.firstOrNull { it.id == id } ?: popularAddableCatalog.firstOrNull { it.id == id }
+
+  fun isPackageIdentifier(input: String): Boolean {
+    val trimmed = input.trim()
+    val packagePattern = Regex("^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*){1,4}$")
+    if (!packagePattern.matches(trimmed)) return false
+    val segments = trimmed.split('.')
+    return segments.first() in reverseDnsPrefixes && segments.last() !in webTlds
+  }
 
   fun normalizeAppLink(input: String): String {
     val trimmed = input.trim()
@@ -233,14 +372,103 @@ object TvAppShortcuts {
     if (Regex("^[a-zA-Z][a-zA-Z0-9+.-]*:.*").matches(trimmed)) {
       return trimmed
     }
-    val packagePattern = Regex("^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*){1,4}$")
-    if (packagePattern.matches(trimmed)) {
-      val segments = trimmed.split('.')
-      if (segments.first() in reverseDnsPrefixes && segments.last() !in webTlds) {
-        return "market://details?id=$trimmed"
-      }
+    if (isPackageIdentifier(trimmed)) {
+      return "market://details?id=$trimmed"
     }
     return "https://$trimmed"
+  }
+
+  fun buildLaunchPlan(shortcut: TvAppShortcut): OttLaunchPlan {
+    val presetMeta = findMetadataPreset(shortcut.id)
+    val link = shortcut.appLink.trim()
+
+    val uri = runCatching { Uri.parse(link) }.getOrNull()
+    val scheme = uri?.scheme?.lowercase().orEmpty()
+    val marketPackage =
+      if (scheme == "market") uri?.getQueryParameter("id")?.trim().orEmpty()
+      else ""
+
+    val host = extractHost(link)
+    val domainMatch =
+      domainToKnownPackages.entries.firstOrNull { (knownHost, _) ->
+        host == knownHost || host.endsWith(".$knownHost")
+      }?.value
+
+    val resolvedPackages =
+      buildList {
+        addAll(shortcut.packageNames)
+        if (presetMeta != null) addAll(presetMeta.packageNames)
+        if (marketPackage.isNotEmpty()) add(marketPackage)
+        if (domainMatch != null) addAll(domainMatch.first)
+      }.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+
+    val resolvedSchemes =
+      buildList {
+        addAll(shortcut.nativeSchemes)
+        if (presetMeta != null) addAll(presetMeta.nativeSchemes)
+        if (domainMatch != null) addAll(domainMatch.second)
+      }.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+
+    val isWebFallback = scheme == "http" || scheme == "https"
+    val hostAndPath =
+      if (isWebFallback && host.isNotEmpty()) {
+        val rawHost = uri?.host.orEmpty()
+        val path = uri?.encodedPath.orEmpty()
+        val query = uri?.encodedQuery?.let { "?$it" }.orEmpty()
+        "$rawHost$path$query"
+      } else {
+        ""
+      }
+
+    // Native-first candidates (never match TV browsers because every candidate either
+    // binds explicit package=<id> or uses an app-only custom URI scheme).
+    val nativeCandidates =
+      buildList {
+        // 1. Explicit Leanback TV launcher Intent scoped to the app package
+        resolvedPackages.forEach { pkg ->
+          add(
+            "intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LEANBACK_LAUNCHER;package=$pkg;end"
+          )
+        }
+        // 2. Package-scoped ACTION_VIEW Intent for TV firmware that only dispatches VIEW intents
+        if (isWebFallback && hostAndPath.isNotEmpty()) {
+          resolvedPackages.forEach { pkg ->
+            add(
+              "intent://$hostAndPath#Intent;scheme=$scheme;action=android.intent.action.VIEW;package=$pkg;end"
+            )
+          }
+        }
+        // 3. App-only custom URI schemes (e.g., vnd.youtube://, nflx://, spotify://)
+        addAll(resolvedSchemes)
+        // 4. Standard LAUNCHER Intent scoped to package (covers sideloaded mobile APKs on TV)
+        resolvedPackages.forEach { pkg ->
+          add(
+            "intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;package=$pkg;end"
+          )
+        }
+        // 5. Direct custom-scheme or intent link if user explicitly saved one
+        if (!isWebFallback && scheme != "market" && link.isNotEmpty()) {
+          add(link)
+        }
+      }.distinct()
+
+    val browserFallback =
+      when {
+        isWebFallback && link.isNotEmpty() -> link
+        marketPackage.isNotEmpty() -> "https://play.google.com/store/apps/details?id=$marketPackage"
+        scheme == "market" && link.isNotEmpty() -> link
+        else -> null
+      }
+
+    return OttLaunchPlan(
+      nativeCandidates = nativeCandidates,
+      browserFallback = browserFallback,
+    )
+  }
+
+  private fun extractHost(url: String): String {
+    val parsed = runCatching { Uri.parse(url.trim()) }.getOrNull() ?: return ""
+    return parsed.host?.lowercase()?.removePrefix("www.").orEmpty()
   }
 
   fun suggestBadge(name: String): String {

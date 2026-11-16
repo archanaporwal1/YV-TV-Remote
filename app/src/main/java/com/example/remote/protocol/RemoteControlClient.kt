@@ -11,26 +11,38 @@ import com.example.proto.remote.RemoteImeObject
 import com.example.proto.remote.RemoteKeyCode
 import com.example.proto.remote.RemoteKeyInject
 import com.example.proto.remote.RemoteMessage
+import com.example.proto.remote.RemotePingRequest
 import com.example.proto.remote.RemotePingResponse
 import com.example.proto.remote.RemoteSetActive
+import com.example.remote.data.OttLaunchPlan
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 import java.io.OutputStream
 import java.net.InetSocketAddress
+import java.net.SocketTimeoutException
+import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.SSLException
 import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLSocket
@@ -44,7 +56,18 @@ data class TvImeState(
   val isImeRequested: Boolean = false,
 )
 
-class RemoteControlClient(private val certificateManager: CertificateManager) {
+enum class OttLaunchOutcome {
+  LAUNCHED_NATIVE_APP,
+  OPENED_IN_BROWSER,
+  FAILED,
+}
+
+class RemoteControlClient(
+  private val certificateManager: CertificateManager,
+  private val keepaliveIntervalMs: Long = DEFAULT_KEEPALIVE_INTERVAL_MS,
+  private val socketReadTimeoutMs: Int = DEFAULT_SOCKET_READ_TIMEOUT_MS,
+  private val staleConnectionTimeoutMs: Long = DEFAULT_STALE_CONNECTION_TIMEOUT_MS,
+) {
 
   sealed class SessionEvent {
     data object Disconnected : SessionEvent()
@@ -61,11 +84,18 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
   private val _imeState = MutableStateFlow(TvImeState())
   val imeState: StateFlow<TvImeState> = _imeState.asStateFlow()
 
+  private val _appLinkErrors = MutableSharedFlow<String>(extraBufferCapacity = 32)
+  val appLinkErrors: SharedFlow<String> = _appLinkErrors.asSharedFlow()
+
   private val writeMutex = Mutex()
   private var scope: CoroutineScope? = null
   private var readerJob: Job? = null
-  private var socket: SSLSocket? = null
-  private var outputStream: OutputStream? = null
+  private var keepaliveJob: Job? = null
+  @Volatile private var socket: SSLSocket? = null
+  @Volatile private var outputStream: OutputStream? = null
+  @Volatile private var lastInboundAtMs: Long = 0L
+  @Volatile private var serverSupportsPingFlow: Boolean = false
+  private val pingSequence = AtomicInteger(1)
 
   fun isConnectionHealthy(): Boolean {
     val sock = socket ?: return false
@@ -89,17 +119,24 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
               useClientMode = true
               keepAlive = true
               tcpNoDelay = true
+              soTimeout = socketReadTimeoutMs
               connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
               startHandshake()
             }
           socket = sslSocket
           outputStream = sslSocket.outputStream
+          lastInboundAtMs = System.currentTimeMillis()
+          serverSupportsPingFlow = false
 
           val sessionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
           scope = sessionScope
           readerJob =
             sessionScope.launch {
-              runReaderLoop(sslSocket)
+              runReaderLoop(sslSocket, sessionScope)
+            }
+          keepaliveJob =
+            sessionScope.launch {
+              runKeepaliveLoop(sslSocket, sessionScope)
             }
           true
         } catch (e: SSLException) {
@@ -122,12 +159,64 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
     }
   }
 
-  private suspend fun runReaderLoop(sslSocket: SSLSocket) {
+  private suspend fun runKeepaliveLoop(sslSocket: SSLSocket, sessionScope: CoroutineScope) {
+    while (sessionScope.isActive && !sslSocket.isClosed && socket === sslSocket) {
+      delay(keepaliveIntervalMs)
+      if (!sessionScope.isActive || sslSocket.isClosed || socket !== sslSocket) break
+      if (_sessionEvent.value !is SessionEvent.Connected) continue
+
+      val silentMs = System.currentTimeMillis() - lastInboundAtMs
+      if (serverSupportsPingFlow && silentMs >= staleConnectionTimeoutMs) {
+        if (sessionScope.isActive && socket === sslSocket) {
+          _sessionEvent.value =
+            SessionEvent.ConnectionLost("TV did not respond to keepalive heartbeat.")
+          cleanupSocketOnly(expectedSocket = sslSocket)
+        }
+        break
+      }
+
+      if (!sendKeepalivePing(sslSocket)) {
+        break
+      }
+    }
+  }
+
+  private suspend fun sendKeepalivePing(targetSocket: SSLSocket? = null): Boolean {
+    val ping =
+      RemoteMessage.newBuilder()
+        .setRemotePingRequest(
+          RemotePingRequest.newBuilder()
+            .setVal1(pingSequence.getAndIncrement())
+            .build()
+        )
+        .build()
+    return sendRemoteMessage(ping, expectedSocket = targetSocket)
+  }
+
+  private suspend fun runReaderLoop(sslSocket: SSLSocket, sessionScope: CoroutineScope) {
     val input = sslSocket.inputStream
     var hasReceivedMessage = false
+    var repliedToServerSetActive = false
     try {
-      while (scope?.isActive == true && !sslSocket.isClosed) {
-        val frameBytes = DelimitedStreamHelper.readDelimitedBytes(input) ?: break
+      while (sessionScope.isActive && !sslSocket.isClosed && socket === sslSocket) {
+        val frameBytes =
+          try {
+            DelimitedStreamHelper.readDelimitedBytes(input) ?: break
+          } catch (_: SocketTimeoutException) {
+            if (!sessionScope.isActive || sslSocket.isClosed || socket !== sslSocket) break
+            if (_sessionEvent.value is SessionEvent.Connected) {
+              val silentMs = System.currentTimeMillis() - lastInboundAtMs
+              if (serverSupportsPingFlow && silentMs >= staleConnectionTimeoutMs) {
+                throw IOException("TV connection timed out after ${silentMs}ms without heartbeat.")
+              }
+              if (!sendKeepalivePing(sslSocket)) {
+                break
+              }
+            }
+            continue
+          }
+
+        lastInboundAtMs = System.currentTimeMillis()
         hasReceivedMessage = true
         val message = RemoteMessage.parseFrom(frameBytes)
 
@@ -137,11 +226,16 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
             _sessionEvent.value = SessionEvent.Connected
           }
           message.hasRemoteSetActive() -> {
+            if (!repliedToServerSetActive) {
+              repliedToServerSetActive = true
+              sendSetActiveReply()
+            }
             if (_sessionEvent.value != SessionEvent.Connected) {
               _sessionEvent.value = SessionEvent.Connected
             }
           }
           message.hasRemotePingRequest() -> {
+            serverSupportsPingFlow = true
             val pingVal = message.remotePingRequest.val1
             val pong =
               RemoteMessage.newBuilder()
@@ -151,7 +245,10 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
                     .build()
                 )
                 .build()
-            sendRemoteMessage(pong)
+            sendRemoteMessage(pong, expectedSocket = sslSocket)
+          }
+          message.hasRemotePingResponse() -> {
+            serverSupportsPingFlow = true
           }
           message.hasRemoteImeKeyInject() -> {
             val imeInject = message.remoteImeKeyInject
@@ -190,12 +287,20 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
             _sessionEvent.value = SessionEvent.Connected
           }
           message.hasRemoteError() -> {
-            _sessionEvent.value = SessionEvent.Error("Remote session error reported by TV.")
-            break
+            val err = message.remoteError
+            if (err.hasMessage() && err.message.hasRemoteAppLinkLaunchRequest()) {
+              val failedLink = err.message.remoteAppLinkLaunchRequest.appLink
+              if (failedLink.isNotEmpty()) {
+                _appLinkErrors.tryEmit(failedLink)
+              }
+            } else {
+              _sessionEvent.value = SessionEvent.Error("Remote session error reported by TV.")
+              break
+            }
           }
         }
       }
-      if (scope?.isActive == true) {
+      if (sessionScope.isActive && socket === sslSocket) {
         if (!hasReceivedMessage && _sessionEvent.value == SessionEvent.Connecting) {
           _sessionEvent.value =
             SessionEvent.PairingRequired(
@@ -210,7 +315,7 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
         }
       }
     } catch (e: SSLException) {
-      if (scope?.isActive == true) {
+      if (sessionScope.isActive && socket === sslSocket) {
         if (isCertificateOrHandshakeError(e) || !hasReceivedMessage) {
           _sessionEvent.value =
             SessionEvent.PairingRequired(
@@ -222,12 +327,12 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
         }
       }
     } catch (e: Exception) {
-      if (scope?.isActive == true) {
+      if (sessionScope.isActive && socket === sslSocket) {
         _sessionEvent.value =
           SessionEvent.ConnectionLost(e.message ?: "Connection to TV was interrupted.")
       }
     } finally {
-      cleanupSocketOnly()
+      cleanupSocketOnly(expectedSocket = sslSocket)
     }
   }
 
@@ -254,7 +359,10 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
         )
         .build()
     sendRemoteMessage(configureReply)
+    sendSetActiveReply()
+  }
 
+  private suspend fun sendSetActiveReply() {
     val setActiveReply =
       RemoteMessage.newBuilder()
         .setRemoteSetActive(
@@ -343,16 +451,58 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
     return sendRemoteMessage(message)
   }
 
-  private suspend fun sendRemoteMessage(message: RemoteMessage): Boolean =
+  suspend fun launchAppWithPlan(
+    plan: OttLaunchPlan,
+    errorWaitMs: Long = NATIVE_LAUNCH_ERROR_WAIT_MS,
+  ): OttLaunchOutcome = coroutineScope {
+    for (candidate in plan.nativeCandidates) {
+      val errorMonitor =
+        async(start = CoroutineStart.UNDISPATCHED) {
+          withTimeoutOrNull(errorWaitMs) {
+            appLinkErrors.first { it == candidate }
+          } != null
+        }
+      val sent = launchApp(candidate)
+      if (!sent) {
+        errorMonitor.cancel()
+        return@coroutineScope OttLaunchOutcome.FAILED
+      }
+      val rejectedByTv = errorMonitor.await()
+      if (!rejectedByTv) {
+        return@coroutineScope OttLaunchOutcome.LAUNCHED_NATIVE_APP
+      }
+    }
+
+    val fallback = plan.browserFallback
+    if (!fallback.isNullOrBlank()) {
+      return@coroutineScope if (launchApp(fallback)) {
+        OttLaunchOutcome.OPENED_IN_BROWSER
+      } else {
+        OttLaunchOutcome.FAILED
+      }
+    }
+
+    OttLaunchOutcome.FAILED
+  }
+
+  private suspend fun sendRemoteMessage(
+    message: RemoteMessage,
+    expectedSocket: SSLSocket? = null,
+  ): Boolean =
     withContext(Dispatchers.IO) {
       writeMutex.withLock {
         val sock = socket
         val out = outputStream
+        if (expectedSocket != null && sock !== expectedSocket) {
+          return@withLock false
+        }
         if (out == null || sock == null || sock.isClosed || !sock.isConnected) {
           if (_sessionEvent.value is SessionEvent.Connected) {
             _sessionEvent.value = SessionEvent.ConnectionLost("Remote socket disconnected.")
           }
-          cleanupSocketOnly()
+          if (sock != null) {
+            cleanupSocketOnly(expectedSocket = sock)
+          }
           return@withLock false
         }
         try {
@@ -367,18 +517,20 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
             } else {
               SessionEvent.ConnectionLost(e.message ?: "TLS session interrupted.")
             }
-          cleanupSocketOnly()
+          cleanupSocketOnly(expectedSocket = sock)
           false
         } catch (e: IOException) {
           _sessionEvent.value =
             SessionEvent.ConnectionLost(e.message ?: "Failed to send command to TV.")
-          cleanupSocketOnly()
+          cleanupSocketOnly(expectedSocket = sock)
           false
         }
       }
     }
 
   private fun teardownSessionOnly() {
+    keepaliveJob?.cancel()
+    keepaliveJob = null
     readerJob?.cancel()
     readerJob = null
     scope?.cancel()
@@ -392,10 +544,14 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
     _sessionEvent.value = SessionEvent.Disconnected
   }
 
-  private fun cleanupSocketOnly() {
+  private fun cleanupSocketOnly(expectedSocket: SSLSocket? = null) {
+    val current = socket
+    if (expectedSocket != null && current !== expectedSocket) {
+      return
+    }
     outputStream = null
     try {
-      socket?.close()
+      current?.close()
     } catch (_: Exception) {
     }
     socket = null
@@ -403,6 +559,10 @@ class RemoteControlClient(private val certificateManager: CertificateManager) {
 
   companion object {
     const val DEFAULT_REMOTE_PORT = 6466
+    const val NATIVE_LAUNCH_ERROR_WAIT_MS = 380L
+    const val DEFAULT_KEEPALIVE_INTERVAL_MS = 10_000L
+    const val DEFAULT_SOCKET_READ_TIMEOUT_MS = 25_000
+    const val DEFAULT_STALE_CONNECTION_TIMEOUT_MS = 35_000L
     private const val FEATURE_CODE_FULL = 622
     private const val CONNECT_TIMEOUT_MS = 8_000
 

@@ -60,11 +60,11 @@ jobs:
             echo "=================================================================="
           fi
 
-      - name: Resolve & Patch Version Metadata in Gradle
+      - name: Resolve Version Metadata
         id: meta
         run: |
           BASE_VER=$(grep -E '^[[:space:]]*versionName[[:space:]]*=' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
-          if [ -z "$BASE_VER" ]; then
+          if [ -z "$BASE_VER" ] || [[ "$BASE_VER" == *"="* ]]; then
             BASE_VER=$(grep -E 'val ciVersionName' -A1 app/build.gradle.kts | grep -oE '"[^"]+"' | tail -n 1 | tr -d '"' || true)
           fi
           BASE_VER=${BASE_VER:-1.0}
@@ -85,22 +85,32 @@ jobs:
             FINAL_CODE="${{ github.run_number }}"
           fi
 
-          # Automatically update versionCode and versionName inside app/build.gradle.kts for this build
-          sed -i -E "s/^([[:space:]]*versionCode[[:space:]]*=[[:space:]]*).*/\1${FINAL_CODE}/" app/build.gradle.kts
-          sed -i -E "s/^([[:space:]]*versionName[[:space:]]*=[[:space:]]*).*/\1\"${FINAL_VER}\"/" app/build.gradle.kts
+          echo "version_name=$FINAL_VER" >> $GITHUB_OUTPUT
+          echo "version_code=$FINAL_CODE" >> $GITHUB_OUTPUT
+          echo "Resolved release version: v$FINAL_VER (versionCode=$FINAL_CODE)"
 
-          # Remove any conflicting signingConfigs so apksigner signs cleanly
+      - name: Build Unsigned Release APK
+        run: |
           sed -i 's/signingConfig = signingConfigs.getByName("release")//g' app/build.gradle.kts || true
           sed -i 's/signingConfig signingConfigs.release//g' app/build.gradle.kts || true
           sed -i 's/signingConfig signingConfigs.getByName("release")//g' app/build.gradle.kts || true
 
-          echo "version_name=$FINAL_VER" >> $GITHUB_OUTPUT
-          echo "version_code=$FINAL_CODE" >> $GITHUB_OUTPUT
-          echo "Resolved & patched release version: v$FINAL_VER (versionCode=$FINAL_CODE)"
+          # Create a Gradle init script to safely force versionCode and versionName without breaking build.gradle.kts
+          cat << 'EOF' > ci-version.init.gradle.kts
+          allprojects {
+              plugins.withId("com.android.application") {
+                  extensions.configure<com.android.build.api.dsl.ApplicationExtension> {
+                      defaultConfig {
+                          versionCode = (project.findProperty("APP_VERSION_CODE") as String).toInt()
+                          versionName = project.findProperty("APP_VERSION_NAME") as String
+                      }
+                  }
+              }
+          }
+          EOF
 
-      - name: Build Unsigned Release APK
-        run: |
           gradle assembleRelease \
+            --init-script ci-version.init.gradle.kts \
             -PAPP_VERSION_CODE=${{ steps.meta.outputs.version_code }} \
             -PAPP_VERSION_NAME=${{ steps.meta.outputs.version_name }} \
             -PRELEASE_REPO=${{ github.repository }}

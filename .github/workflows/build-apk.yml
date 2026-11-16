@@ -55,7 +55,7 @@ jobs:
           $BT/zipalign -p 4 "$APK" aligned.apk
           $BT/apksigner sign --ks my-upload-key.jks --ks-pass pass:"$PASS" --ks-key-alias "$FINAL_ALIAS" --key-pass pass:"$KEYPASS" --out "YV-TV-Remote-v${VER}.apk" aligned.apk
           NOTES=$(git log -1 --pretty=%s || echo "Automated release")
-          NOTES="$NOTES" python3 -c 'import json,os;v=os.environ["VER"];r=os.environ["REPO"];open("update-manifest.json","w").write(json.dumps({"versionCode":int("${{ github.run_number }}"),"versionName":v,"title":f"YV TV Remote v{v}","notes":os.environ["NOTES"],"apkUrl":f"https://github.com{r}/releases/download/v{v}/YV-TV-Remote-v{v}.apk"},indent=2))'
+          VER="$VER" NOTES="$NOTES" python3 -c 'import json,os;v=os.environ["VER"];r=os.environ["REPO"];open("update-manifest.json","w").write(json.dumps({"versionCode":int("${{ github.run_number }}"),"versionName":v,"title":f"YV TV Remote v{v}","notes":os.environ["NOTES"],"apkUrl":f"https://github.com{r}/releases/download/v{v}/YV-TV-Remote-v{v}.apk"},indent=2))'
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VER }}

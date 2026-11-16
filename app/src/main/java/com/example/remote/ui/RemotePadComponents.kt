@@ -26,7 +26,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.automirrored.rounded.Input
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
@@ -38,7 +37,6 @@ import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Menu
-import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
@@ -57,15 +55,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -79,7 +73,6 @@ import com.example.proto.remote.RemoteKeyCode
 import com.example.remote.data.TvAppShortcut
 import com.example.remote.data.TvAppShortcuts
 import com.example.remote.feedback.FeedbackCue
-import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
@@ -108,6 +101,17 @@ fun TactileKeyButton(
       label = "key_border",
     )
 
+  val sheenBrush =
+    remember(containerColor) {
+      if (containerColor == Color.Transparent) {
+        Brush.verticalGradient(listOf(Color.Transparent, Color.Transparent))
+      } else {
+        Brush.verticalGradient(
+          listOf(Color.White.copy(alpha = 0.06f), Color.Transparent, Color.Black.copy(alpha = 0.14f))
+        )
+      }
+    }
+
   Surface(
     color = containerColor,
     shape = shape,
@@ -123,7 +127,10 @@ fun TactileKeyButton(
           onClick = onClick,
         ),
   ) {
-    Box(contentAlignment = Alignment.Center) {
+    Box(
+      modifier = Modifier.background(sheenBrush),
+      contentAlignment = Alignment.Center,
+    ) {
       content()
     }
   }
@@ -405,13 +412,30 @@ fun PrimaryNavigationRow(
       onClick = { onKey(RemoteKeyCode.KEYCODE_MENU, FeedbackCue.NAV_TICK) },
       modifier = Modifier.weight(1f),
     )
-    NavActionButton(
-      icon = Icons.AutoMirrored.Rounded.Input,
-      label = "Input",
-      testTag = "btn_input",
+    TactileKeyButton(
       onClick = { onKey(RemoteKeyCode.KEYCODE_TV_INPUT, FeedbackCue.NAV_TICK) },
-      modifier = Modifier.weight(1f),
-    )
+      contentDescription = "Input",
+      shape = RoundedCornerShape(16.dp),
+      modifier = Modifier.weight(1f).height(58.dp).testTag("btn_input"),
+    ) {
+      Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+      ) {
+        TvInputSourceGlyph(
+          tint = MaterialTheme.colorScheme.onSurface,
+          modifier = Modifier.size(20.dp),
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+          text = "Input",
+          style = MaterialTheme.typography.labelMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          maxLines = 1,
+          softWrap = false,
+        )
+      }
+    }
   }
 }
 
@@ -600,7 +624,7 @@ fun MediaTransportBar(
       listOf(
         Triple(Icons.Rounded.SkipPrevious, "Previous", RemoteKeyCode.KEYCODE_MEDIA_PREVIOUS),
         Triple(Icons.Rounded.FastRewind, "Rewind", RemoteKeyCode.KEYCODE_MEDIA_REWIND),
-        Triple(Icons.Rounded.PlayArrow, "Play Pause", RemoteKeyCode.KEYCODE_MEDIA_PLAY_PAUSE),
+        Triple(null, "Play Pause", RemoteKeyCode.KEYCODE_MEDIA_PLAY_PAUSE),
         Triple(Icons.Rounded.FastForward, "Fast Forward", RemoteKeyCode.KEYCODE_MEDIA_FAST_FORWARD),
         Triple(Icons.Rounded.SkipNext, "Next", RemoteKeyCode.KEYCODE_MEDIA_NEXT),
       )
@@ -622,15 +646,20 @@ fun MediaTransportBar(
         borderColor =
           if (isPlayPause) MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
           else MaterialTheme.colorScheme.outlineVariant,
-        modifier = Modifier.weight(if (isPlayPause) 1.25f else 1f).height(52.dp).testTag("media_${keyCode.name.lowercase()}"),
+        modifier = Modifier.weight(if (isPlayPause) 1.28f else 1f).height(52.dp).testTag("media_${keyCode.name.lowercase()}"),
       ) {
-        Icon(
-          imageVector = icon,
-          contentDescription = label,
-          tint =
-            if (isPlayPause) MaterialTheme.colorScheme.primary
-            else MaterialTheme.colorScheme.onSurface,
-        )
+        if (icon == null) {
+          PlayPauseGlyph(
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(24.dp),
+          )
+        } else {
+          Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = MaterialTheme.colorScheme.onSurface,
+          )
+        }
       }
     }
   }
@@ -661,10 +690,10 @@ fun StreamingShortcutsGrid(
           TactileKeyButton(
             onClick = { onLaunchShortcut(shortcut) },
             contentDescription = "Launch ${shortcut.name}",
-            shape = RoundedCornerShape(16.dp),
+            shape = RoundedCornerShape(18.dp),
             containerColor = MaterialTheme.colorScheme.surface,
             borderColor = shortcut.accentColor.copy(alpha = 0.35f),
-            modifier = Modifier.weight(1f).height(76.dp).testTag("shortcut_${shortcut.id}"),
+            modifier = Modifier.weight(1f).height(88.dp).testTag("shortcut_${shortcut.id}"),
           ) {
             Column(
               modifier =
@@ -683,9 +712,9 @@ fun StreamingShortcutsGrid(
               horizontalAlignment = Alignment.CenterHorizontally,
               verticalArrangement = Arrangement.Center,
             ) {
-              ShortcutBrandGlyph(
+              OttAppIconTile(
                 shortcut = shortcut,
-                modifier = Modifier.size(30.dp),
+                modifier = Modifier.size(42.dp),
               )
               Spacer(Modifier.height(6.dp))
               Text(
@@ -703,219 +732,6 @@ fun StreamingShortcutsGrid(
         repeat(3 - rowItems.size) {
           Spacer(modifier = Modifier.weight(1f))
         }
-      }
-    }
-  }
-}
-
-@Composable
-private fun ShortcutBrandGlyph(
-  shortcut: TvAppShortcut,
-  modifier: Modifier = Modifier,
-) {
-  val accent = shortcut.accentColor
-  Canvas(modifier = modifier) {
-    val w = size.width
-    val h = size.height
-    when (shortcut.id) {
-      "youtube" -> {
-        drawRoundRect(
-          color = accent,
-          topLeft = Offset(w * 0.06f, h * 0.18f),
-          size = Size(w * 0.88f, h * 0.64f),
-          cornerRadius = CornerRadius(w * 0.2f, w * 0.2f),
-        )
-        val play =
-          Path().apply {
-            moveTo(w * 0.42f, h * 0.34f)
-            lineTo(w * 0.66f, h * 0.50f)
-            lineTo(w * 0.42f, h * 0.66f)
-            close()
-          }
-        drawPath(play, Color.White)
-      }
-
-      "netflix" -> {
-        // Stylized folded N ribbon
-        drawRect(
-          color = Color(0xFFB20710),
-          topLeft = Offset(w * 0.24f, h * 0.12f),
-          size = Size(w * 0.17f, h * 0.76f),
-        )
-        drawRect(
-          color = Color(0xFFB20710),
-          topLeft = Offset(w * 0.59f, h * 0.12f),
-          size = Size(w * 0.17f, h * 0.76f),
-        )
-        val diag =
-          Path().apply {
-            moveTo(w * 0.24f, h * 0.12f)
-            lineTo(w * 0.41f, h * 0.12f)
-            lineTo(w * 0.76f, h * 0.88f)
-            lineTo(w * 0.59f, h * 0.88f)
-            close()
-          }
-        drawPath(diag, accent)
-      }
-
-      "prime_video" -> {
-        // Play circle + smile arc
-        drawCircle(
-          color = accent.copy(alpha = 0.22f),
-          radius = w * 0.44f,
-          center = Offset(w * 0.5f, h * 0.46f),
-        )
-        val play =
-          Path().apply {
-            moveTo(w * 0.42f, h * 0.26f)
-            lineTo(w * 0.68f, h * 0.42f)
-            lineTo(w * 0.42f, h * 0.58f)
-            close()
-          }
-        drawPath(play, accent)
-        val smile =
-          Path().apply {
-            moveTo(w * 0.22f, h * 0.72f)
-            quadraticTo(w * 0.50f, h * 0.92f, w * 0.78f, h * 0.68f)
-          }
-        drawPath(
-          smile,
-          color = accent,
-          style = Stroke(width = w * 0.09f, cap = StrokeCap.Round),
-        )
-      }
-
-      "jiocinema" -> {
-        // Dual cinema ring + play triangle
-        drawCircle(
-          color = accent,
-          radius = w * 0.42f,
-          center = center,
-          style = Stroke(width = w * 0.10f),
-        )
-        val play =
-          Path().apply {
-            moveTo(w * 0.43f, h * 0.34f)
-            lineTo(w * 0.65f, h * 0.50f)
-            lineTo(w * 0.43f, h * 0.66f)
-            close()
-          }
-        drawPath(play, accent)
-      }
-
-      "hotstar" -> {
-        // 5-point radiant star emblem
-        val star = Path()
-        val cx = w * 0.5f
-        val cy = h * 0.52f
-        val outer = w * 0.42f
-        val inner = w * 0.18f
-        for (i in 0 until 10) {
-          val r = if (i % 2 == 0) outer else inner
-          val angle = -PI / 2.0 + i * (PI / 5.0)
-          val x = cx + (r * cos(angle)).toFloat()
-          val y = cy + (r * sin(angle)).toFloat()
-          if (i == 0) star.moveTo(x, y) else star.lineTo(x, y)
-        }
-        star.close()
-        drawPath(star, accent)
-      }
-
-      "sonyliv" -> {
-        // Prism play shield
-        drawRoundRect(
-          color = accent.copy(alpha = 0.22f),
-          topLeft = Offset(w * 0.12f, h * 0.12f),
-          size = Size(w * 0.76f, h * 0.76f),
-          cornerRadius = CornerRadius(w * 0.22f, w * 0.22f),
-        )
-        drawRoundRect(
-          color = accent,
-          topLeft = Offset(w * 0.12f, h * 0.12f),
-          size = Size(w * 0.76f, h * 0.76f),
-          cornerRadius = CornerRadius(w * 0.22f, w * 0.22f),
-          style = Stroke(width = w * 0.08f),
-        )
-        val play =
-          Path().apply {
-            moveTo(w * 0.42f, h * 0.33f)
-            lineTo(w * 0.66f, h * 0.50f)
-            lineTo(w * 0.42f, h * 0.67f)
-            close()
-          }
-        drawPath(play, accent)
-      }
-
-      "zee5" -> {
-        // Concentric arc + bold Z stroke
-        drawCircle(
-          color = accent,
-          radius = w * 0.42f,
-          center = center,
-          style = Stroke(width = w * 0.09f),
-        )
-        val zPath =
-          Path().apply {
-            moveTo(w * 0.34f, h * 0.34f)
-            lineTo(w * 0.66f, h * 0.34f)
-            lineTo(w * 0.34f, h * 0.66f)
-            lineTo(w * 0.66f, h * 0.66f)
-          }
-        drawPath(
-          zPath,
-          color = Color.White,
-          style = Stroke(width = w * 0.09f, cap = StrokeCap.Round, join = StrokeJoin.Round),
-        )
-      }
-
-      "sunnxt" -> {
-        // Radiant sun disc with rays
-        drawCircle(
-          color = accent,
-          radius = w * 0.24f,
-          center = center,
-        )
-        for (i in 0 until 8) {
-          val angle = i * (PI / 4.0)
-          val start =
-            Offset(
-              center.x + (w * 0.32f * cos(angle)).toFloat(),
-              center.y + (h * 0.32f * sin(angle)).toFloat(),
-            )
-          val end =
-            Offset(
-              center.x + (w * 0.45f * cos(angle)).toFloat(),
-              center.y + (h * 0.45f * sin(angle)).toFloat(),
-            )
-          drawLine(accent, start, end, strokeWidth = w * 0.08f, cap = StrokeCap.Round)
-        }
-      }
-
-      else -> {
-        // JioTV live broadcast waves + core dot
-        drawCircle(
-          color = accent,
-          radius = w * 0.14f,
-          center = Offset(w * 0.5f, h * 0.64f),
-        )
-        drawArc(
-          color = accent,
-          startAngle = 215f,
-          sweepAngle = 110f,
-          useCenter = false,
-          topLeft = Offset(w * 0.24f, h * 0.32f),
-          size = Size(w * 0.52f, h * 0.52f),
-          style = Stroke(width = w * 0.09f, cap = StrokeCap.Round),
-        )
-        drawArc(
-          color = accent.copy(alpha = 0.7f),
-          startAngle = 215f,
-          sweepAngle = 110f,
-          useCenter = false,
-          topLeft = Offset(w * 0.08f, h * 0.14f),
-          size = Size(w * 0.84f, h * 0.84f),
-          style = Stroke(width = w * 0.09f, cap = StrokeCap.Round),
-        )
       }
     }
   }

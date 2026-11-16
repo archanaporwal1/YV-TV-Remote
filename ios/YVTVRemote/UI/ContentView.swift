@@ -148,9 +148,8 @@ private struct ConnectionHubScreen: View {
         .fill(Color.midnightSlate)
         .frame(width: 46, height: 46)
         .overlay(
-          Text("YV")
-            .font(.headline.weight(.bold))
-            .foregroundStyle(Color(red: 0.94, green: 0.76, blue: 0.32))
+          YvBrandLogoMark()
+            .padding(6)
         )
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.subtleOutline, lineWidth: 1))
 
@@ -621,7 +620,7 @@ private struct RemoteControlScreen: View {
   private var modeAndKeyboardBar: some View {
     HStack {
       HStack(spacing: 4) {
-        modePill("D-Pad", icon: "dpad.fill", mode: .dpad)
+        modePill("D-Pad", icon: nil, mode: .dpad)
         modePill("Touchpad", icon: "hand.draw.fill", mode: .touchpad)
       }
       .padding(4)
@@ -659,17 +658,27 @@ private struct RemoteControlScreen: View {
     }
   }
 
-  private func modePill(_ title: String, icon: String, mode: RemoteInputMode) -> some View {
+  private func modePill(_ title: String, icon: String?, mode: RemoteInputMode) -> some View {
     let selected = viewModel.inputMode == mode
+    let tint: Color = selected ? .electricCyan : .secondary
     return Button {
       viewModel.inputMode = mode
     } label: {
-      Label(title, systemImage: icon)
-        .font(.caption.weight(.semibold))
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .foregroundStyle(selected ? Color.electricCyan : .secondary)
-        .background(selected ? Color.electricCyan.opacity(0.18) : .clear, in: Capsule())
+      HStack(spacing: 5) {
+        if let icon {
+          Image(systemName: icon)
+            .font(.caption.weight(.semibold))
+        } else {
+          DPadModeGlyphView(tint: tint)
+            .frame(width: 15, height: 15)
+        }
+        Text(title)
+          .font(.caption.weight(.semibold))
+      }
+      .padding(.horizontal, 12)
+      .padding(.vertical, 8)
+      .foregroundStyle(tint)
+      .background(selected ? Color.electricCyan.opacity(0.18) : .clear, in: Capsule())
     }
   }
 
@@ -678,7 +687,20 @@ private struct RemoteControlScreen: View {
       navButton("Back", icon: "arrow.uturn.backward") { viewModel.sendKey(TvKeyCode.back, cue: .backHome) }
       navButton("Home", icon: "house.fill") { viewModel.sendKey(TvKeyCode.home, cue: .backHome) }
       navButton("Menu", icon: "line.3.horizontal") { viewModel.sendKey(TvKeyCode.menu, cue: .navTick) }
-      navButton("Input", icon: "rectangle.portrait.and.arrow.right") { viewModel.sendKey(TvKeyCode.tvInput, cue: .navTick) }
+      Button {
+        viewModel.sendKey(TvKeyCode.tvInput, cue: .navTick)
+      } label: {
+        VStack(spacing: 4) {
+          TvInputGlyphView(tint: .white)
+            .frame(width: 18, height: 18)
+          Text("Input").font(.caption2.weight(.medium))
+        }
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity)
+        .frame(height: 58)
+        .background(Color.raisedPod, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.subtleOutline, lineWidth: 1))
+      }
     }
   }
 
@@ -690,7 +712,7 @@ private struct RemoteControlScreen: View {
       }
       .foregroundStyle(.white)
       .frame(maxWidth: .infinity)
-      .frame(height: 56)
+      .frame(height: 58)
       .background(Color.raisedPod, in: RoundedRectangle(cornerRadius: 16))
       .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.subtleOutline, lineWidth: 1))
     }
@@ -778,20 +800,24 @@ private struct RemoteControlScreen: View {
             viewModel.launchShortcut(shortcut)
           } label: {
             VStack(spacing: 6) {
-              Text(shortcut.badge)
-                .font(.caption.weight(.heavy))
-                .foregroundStyle(.white)
-                .frame(width: 32, height: 32)
-                .background(shortcut.accentColor.opacity(0.85), in: RoundedRectangle(cornerRadius: 9))
+              OttAppIconTileView(shortcut: shortcut)
+                .frame(width: 42, height: 42)
               Text(shortcut.name)
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 74)
-            .background(Color.midnightSlate, in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(shortcut.accentColor.opacity(0.4), lineWidth: 1))
+            .frame(height: 86)
+            .background(
+              LinearGradient(
+                colors: [shortcut.accentColor.opacity(0.14), Color.midnightSlate],
+                startPoint: .top,
+                endPoint: .bottom
+              ),
+              in: RoundedRectangle(cornerRadius: 18)
+            )
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(shortcut.accentColor.opacity(0.35), lineWidth: 1))
           }
         }
       }

@@ -36,7 +36,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CastConnected
-import androidx.compose.material.icons.rounded.Gamepad
 import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Search
@@ -615,7 +614,7 @@ private fun InputModeSwitcher(
     ) {
       ModePillOption(
         selected = mode == RemoteInputMode.DPAD,
-        icon = Icons.Rounded.Gamepad,
+        icon = null,
         label = "D-Pad",
         testTag = "mode_dpad_button",
         onClick = { onSwitch(RemoteInputMode.DPAD) },
@@ -634,7 +633,7 @@ private fun InputModeSwitcher(
 @Composable
 private fun ModePillOption(
   selected: Boolean,
-  icon: androidx.compose.ui.graphics.vector.ImageVector,
+  icon: androidx.compose.ui.graphics.vector.ImageVector?,
   label: String,
   testTag: String,
   onClick: () -> Unit,
@@ -655,14 +654,22 @@ private fun ModePillOption(
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-      Icon(
-        imageVector = icon,
-        contentDescription = null,
-        tint =
-          if (selected) MaterialTheme.colorScheme.primary
-          else MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.size(16.dp),
-      )
+      val iconTint =
+        if (selected) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.onSurfaceVariant
+      if (icon != null) {
+        Icon(
+          imageVector = icon,
+          contentDescription = null,
+          tint = iconTint,
+          modifier = Modifier.size(16.dp),
+        )
+      } else {
+        DPadModeGlyph(
+          tint = iconTint,
+          modifier = Modifier.size(16.dp),
+        )
+      }
       Text(
         text = label,
         style = MaterialTheme.typography.labelLarge,

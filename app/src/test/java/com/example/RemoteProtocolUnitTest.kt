@@ -165,4 +165,51 @@ class RemoteProtocolUnitTest {
     org.junit.Assert.assertFalse(mgr.isNewerVersion("1.0.5", 5, "1.0.5", 5))
     org.junit.Assert.assertFalse(mgr.isNewerVersion("1.0.4", 4, "1.0.5", 5))
   }
+
+  @Test
+  fun voiceCommandParserMapsKeysOttAppsAndSearches() {
+    val parser = com.example.remote.voice.VoiceCommandParser
+    val volUp = parser.parse("Please volume up")
+    org.junit.Assert.assertTrue(volUp is com.example.remote.voice.ParsedVoiceCommand.SendKey)
+    assertEquals(
+      RemoteKeyCode.KEYCODE_VOLUME_UP,
+      (volUp as com.example.remote.voice.ParsedVoiceCommand.SendKey).keyCode,
+    )
+
+    val pause = parser.parse("pause")
+    assertEquals(
+      RemoteKeyCode.KEYCODE_MEDIA_PLAY_PAUSE,
+      (pause as com.example.remote.voice.ParsedVoiceCommand.SendKey).keyCode,
+    )
+
+    val openNetflix = parser.parse("Open Netflix")
+    org.junit.Assert.assertTrue(openNetflix is com.example.remote.voice.ParsedVoiceCommand.OpenOttApp)
+    assertEquals(
+      "netflix",
+      (openNetflix as com.example.remote.voice.ParsedVoiceCommand.OpenOttApp).shortcut.id,
+    )
+
+    val openPrime = parser.parse("launch Amazon Prime")
+    org.junit.Assert.assertTrue(openPrime is com.example.remote.voice.ParsedVoiceCommand.OpenOttApp)
+    assertEquals(
+      "prime_video",
+      (openPrime as com.example.remote.voice.ParsedVoiceCommand.OpenOttApp).shortcut.id,
+    )
+
+    val explicitSearch = parser.parse("search for Stranger Things")
+    org.junit.Assert.assertTrue(explicitSearch is com.example.remote.voice.ParsedVoiceCommand.SearchOrType)
+    assertEquals(
+      "Stranger Things",
+      (explicitSearch as com.example.remote.voice.ParsedVoiceCommand.SearchOrType).query,
+    )
+
+    val naturalSearch = parser.parse("Lo-fi focus beats")
+    org.junit.Assert.assertTrue(naturalSearch is com.example.remote.voice.ParsedVoiceCommand.SearchOrType)
+    assertEquals(
+      "Lo-fi focus beats",
+      (naturalSearch as com.example.remote.voice.ParsedVoiceCommand.SearchOrType).query,
+    )
+
+    assertNull(parser.parse("   "))
+  }
 }

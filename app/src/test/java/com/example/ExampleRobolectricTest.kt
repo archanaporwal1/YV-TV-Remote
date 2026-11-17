@@ -871,4 +871,628 @@ class ExampleRobolectricTest {
     org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
     serverThread.join(1_500L)
   }
+
+  @Test
+  fun `handshake sends RemoteConfigure once on TV configure and RemoteSetActive once on TV setActive`() {
+    kotlinx.coroutines.runBlocking {
+      val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+      val certManager = CertificateManager(app)
+      val serverKeyStore = certManager.ensureClientIdentity()
+      val kmf =
+        javax.net.ssl.KeyManagerFactory.getInstance(
+          javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
+        ).apply {
+          init(serverKeyStore, "yvtv_remote_keystore_pass".toCharArray())
+        }
+      val trustAll =
+        object : javax.net.ssl.X509TrustManager {
+          override fun checkClientTrusted(
+            chain: Array<out java.security.cert.X509Certificate>?,
+            authType: String?,
+          ) {}
+
+          override fun checkServerTrusted(
+            chain: Array<out java.security.cert.X509Certificate>?,
+            authType: String?,
+          ) {}
+
+          override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+        }
+      val serverSslContext =
+        javax.net.ssl.SSLContext.getInstance("TLS").apply {
+          init(kmf.keyManagers, arrayOf<javax.net.ssl.TrustManager>(trustAll), null)
+        }
+      val serverSocket =
+        (serverSslContext.serverSocketFactory.createServerSocket(0) as javax.net.ssl.SSLServerSocket)
+          .apply {
+            needClientAuth = false
+          }
+
+      val configureCount = java.util.concurrent.atomic.AtomicInteger(0)
+      val configureFeatureCode = java.util.concurrent.atomic.AtomicInteger(0)
+      val setActiveBeforeServerSetActive = java.util.concurrent.atomic.AtomicInteger(0)
+      val totalSetActiveCount = java.util.concurrent.atomic.AtomicInteger(0)
+      val firstConfigureLatch = java.util.concurrent.CountDownLatch(1)
+      val setActiveLatch = java.util.concurrent.CountDownLatch(1)
+
+      val serverThread =
+        Thread {
+          try {
+            val client = serverSocket.accept() as javax.net.ssl.SSLSocket
+            client.startHandshake()
+            val configureMsg =
+              com.example.proto.remote.RemoteMessage.newBuilder()
+                .setRemoteConfigure(
+                  com.example.proto.remote.RemoteConfigure.newBuilder()
+                    .setCode1(622)
+                    .build()
+                )
+                .build()
+            com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, configureMsg)
+
+            val input = client.inputStream
+            var sentServerSetActive = false
+            while (!client.isClosed) {
+              val frame = com.example.remote.protocol.DelimitedStreamHelper.readDelimitedBytes(input) ?: break
+              val msg = com.example.proto.remote.RemoteMessage.parseFrom(frame)
+              when {
+                msg.hasRemoteConfigure() -> {
+                  configureCount.incrementAndGet()
+                  configureFeatureCode.set(msg.remoteConfigure.code1)
+                  firstConfigureLatch.countDown()
+                  if (!sentServerSetActive) {
+                    sentServerSetActive = true
+                    Thread.sleep(60L)
+                    val setActiveMsg =
+                      com.example.proto.remote.RemoteMessage.newBuilder()
+                        .setRemoteSetActive(
+                          com.example.proto.remote.RemoteSetActive.newBuilder()
+                            .setActive(622)
+                            .build()
+                        )
+                        .build()
+                    com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, setActiveMsg)
+                  }
+                }
+                msg.hasRemoteSetActive() -> {
+                  if (!sentServerSetActive) {
+                    setActiveBeforeServerSetActive.incrementAndGet()
+                  }
+                  totalSetActiveCount.incrementAndGet()
+                  setActiveLatch.countDown()
+                }
+              }
+            }
+            client.close()
+          } catch (_: Throwable) {
+          } finally {
+            try {
+              serverSocket.close()
+            } catch (_: Exception) {
+            }
+          }
+        }.apply { start() }
+
+      val client = com.example.remote.protocol.RemoteControlClient(certManager)
+      client.connect("127.0.0.1", serverSocket.localPort)
+
+      assertTrue(firstConfigureLatch.await(3, java.util.concurrent.TimeUnit.SECONDS))
+      assertTrue(setActiveLatch.await(3, java.util.concurrent.TimeUnit.SECONDS))
+      kotlinx.coroutines.delay(100L)
+
+      assertEquals(1, configureCount.get())
+      assertEquals(639, configureFeatureCode.get())
+      assertEquals(0, setActiveBeforeServerSetActive.get())
+      assertEquals(1, totalSetActiveCount.get())
+      assertTrue(client.isConnectionHealthy())
+
+      client.disconnect()
+      serverThread.join(1_500L)
+    }
+  }
+
+  @Test
+  fun `session stays connected with server-initiated pings and un-echoed RemoteError during OTT launch`() {
+    kotlinx.coroutines.runBlocking {
+      val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+      val certManager = CertificateManager(app)
+      val serverKeyStore = certManager.ensureClientIdentity()
+      val kmf =
+        javax.net.ssl.KeyManagerFactory.getInstance(
+          javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
+        ).apply {
+          init(serverKeyStore, "yvtv_remote_keystore_pass".toCharArray())
+        }
+      val trustAll =
+        object : javax.net.ssl.X509TrustManager {
+          override fun checkClientTrusted(
+            chain: Array<out java.security.cert.X509Certificate>?,
+            authType: String?,
+          ) {}
+
+          override fun checkServerTrusted(
+            chain: Array<out java.security.cert.X509Certificate>?,
+            authType: String?,
+          ) {}
+
+          override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+        }
+      val serverSslContext =
+        javax.net.ssl.SSLContext.getInstance("TLS").apply {
+          init(kmf.keyManagers, arrayOf<javax.net.ssl.TrustManager>(trustAll), null)
+        }
+      val serverSocket =
+        (serverSslContext.serverSocketFactory.createServerSocket(0) as javax.net.ssl.SSLServerSocket)
+          .apply {
+            needClientAuth = false
+          }
+
+      val serverPongsReceived = java.util.concurrent.atomic.AtomicInteger(0)
+      val receivedAppLinks = java.util.Collections.synchronizedList(mutableListOf<String>())
+      val browserFallbackReceivedLatch = java.util.concurrent.CountDownLatch(1)
+      val netflix = com.example.remote.data.TvAppShortcuts.all.first { it.id == "netflix" }
+      val netflixPlan = com.example.remote.data.TvAppShortcuts.buildLaunchPlan(netflix)
+
+      val serverThread =
+        Thread {
+          try {
+            val client = serverSocket.accept() as javax.net.ssl.SSLSocket
+            client.startHandshake()
+            val configureMsg =
+              com.example.proto.remote.RemoteMessage.newBuilder()
+                .setRemoteConfigure(
+                  com.example.proto.remote.RemoteConfigure.newBuilder()
+                    .setCode1(622)
+                    .build()
+                )
+                .build()
+            com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, configureMsg)
+
+            val pinger =
+              Thread {
+                try {
+                  var seq = 1
+                  while (!client.isClosed) {
+                    Thread.sleep(90L)
+                    val serverPing =
+                      com.example.proto.remote.RemoteMessage.newBuilder()
+                        .setRemotePingRequest(
+                          com.example.proto.remote.RemotePingRequest.newBuilder()
+                            .setVal1(seq++)
+                            .build()
+                        )
+                        .build()
+                    com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, serverPing)
+                  }
+                } catch (_: Throwable) {
+                }
+              }.apply { start() }
+
+            val input = client.inputStream
+            while (!client.isClosed) {
+              val frame = com.example.remote.protocol.DelimitedStreamHelper.readDelimitedBytes(input) ?: break
+              val msg = com.example.proto.remote.RemoteMessage.parseFrom(frame)
+              when {
+                msg.hasRemotePingResponse() -> {
+                  serverPongsReceived.incrementAndGet()
+                }
+                msg.hasRemoteAppLinkLaunchRequest() -> {
+                  val link = msg.remoteAppLinkLaunchRequest.appLink
+                  receivedAppLinks.add(link)
+                  if (!link.startsWith("https://")) {
+                    // Reject without echoing remoteAppLinkLaunchRequest in error.message
+                    val unEchoedErr =
+                      com.example.proto.remote.RemoteMessage.newBuilder()
+                        .setRemoteError(
+                          com.example.proto.remote.RemoteError.newBuilder()
+                            .setValue(true)
+                            .build()
+                        )
+                        .build()
+                    com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, unEchoedErr)
+                  } else {
+                    browserFallbackReceivedLatch.countDown()
+                  }
+                }
+              }
+            }
+            client.close()
+            pinger.join(500L)
+          } catch (_: Throwable) {
+          } finally {
+            try {
+              serverSocket.close()
+            } catch (_: Exception) {
+            }
+          }
+        }.apply { start() }
+
+      val client =
+        com.example.remote.protocol.RemoteControlClient(
+          certificateManager = certManager,
+          keepaliveIntervalMs = 70L,
+          socketReadTimeoutMs = 150,
+          staleConnectionTimeoutMs = 280L,
+        )
+      client.connect("127.0.0.1", serverSocket.localPort)
+      val deadline = System.currentTimeMillis() + 5_000L
+      while (System.currentTimeMillis() < deadline && !client.isConnectionHealthy()) {
+        kotlinx.coroutines.delay(20L)
+      }
+      assertTrue(client.isConnectionHealthy())
+
+      // Wait past staleConnectionTimeoutMs while TV does NOT answer client pings (only sends server pings)
+      kotlinx.coroutines.delay(500L)
+      assertTrue(
+        "Server-initiated ping TVs must stay connected even if client pings go unanswered",
+        client.isConnectionHealthy(),
+      )
+      assertTrue("Expected server ping responses, got ${serverPongsReceived.get()}", serverPongsReceived.get() >= 2)
+
+      // Now simulate clicking Netflix when TV rejects every native probe with an UN-ECHOED RemoteError
+      val outcome = client.launchAppWithPlan(netflixPlan, errorWaitMs = 120L)
+      assertEquals(com.example.remote.protocol.OttLaunchOutcome.OPENED_IN_BROWSER, outcome)
+      assertTrue(
+        "Expected server to receive browser fallback URL",
+        browserFallbackReceivedLatch.await(2, java.util.concurrent.TimeUnit.SECONDS),
+      )
+      assertEquals(netflixPlan.nativeCandidates.size + 1, receivedAppLinks.size)
+      assertEquals(netflixPlan.browserFallback, receivedAppLinks.last())
+      assertTrue("Un-echoed RemoteError must NOT tear down TLS session", client.isConnectionHealthy())
+
+      client.disconnect()
+      serverThread.join(1_500L)
+    }
+  }
+
+  @Test
+  fun `viewModel pauses auto-reconnect after 3 rapid drops and recovers when user taps retry`() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val certManager = CertificateManager(app)
+    val serverKeyStore = certManager.ensureClientIdentity()
+    val kmf =
+      javax.net.ssl.KeyManagerFactory.getInstance(
+        javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
+      ).apply {
+        init(serverKeyStore, "yvtv_remote_keystore_pass".toCharArray())
+      }
+    val trustAll =
+      object : javax.net.ssl.X509TrustManager {
+        override fun checkClientTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+
+        override fun checkServerTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+
+        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+      }
+    val serverSslContext =
+      javax.net.ssl.SSLContext.getInstance("TLS").apply {
+        init(kmf.keyManagers, arrayOf<javax.net.ssl.TrustManager>(trustAll), null)
+      }
+    val serverSocket =
+      (serverSslContext.serverSocketFactory.createServerSocket(0) as javax.net.ssl.SSLServerSocket)
+        .apply {
+          needClientAuth = false
+        }
+
+    val acceptCount = java.util.concurrent.atomic.AtomicInteger(0)
+    val keepFourthAlive = java.util.concurrent.CountDownLatch(1)
+
+    val serverThread =
+      Thread {
+        try {
+          while (!serverSocket.isClosed && acceptCount.get() < 4) {
+            val client = serverSocket.accept() as javax.net.ssl.SSLSocket
+            val num = acceptCount.incrementAndGet()
+            client.startHandshake()
+            val configureMsg =
+              com.example.proto.remote.RemoteMessage.newBuilder()
+                .setRemoteConfigure(
+                  com.example.proto.remote.RemoteConfigure.newBuilder()
+                    .setCode1(622)
+                    .build()
+                )
+                .build()
+            com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, configureMsg)
+            if (num <= 3) {
+              // Simulate rapid drop immediately after connecting
+              Thread.sleep(70L)
+              client.close()
+            } else {
+              // Manual Retry succeeds and stays open
+              keepFourthAlive.await(4, java.util.concurrent.TimeUnit.SECONDS)
+              client.close()
+            }
+          }
+        } catch (_: Throwable) {
+        } finally {
+          try {
+            serverSocket.close()
+          } catch (_: Exception) {
+          }
+        }
+      }.apply { start() }
+
+    fun pumpMainLooperUntil(timeoutMs: Long = 8_000L, condition: () -> Boolean): Boolean {
+      val mainLooperShadow = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+      val deadline = System.currentTimeMillis() + timeoutMs
+      while (System.currentTimeMillis() < deadline) {
+        mainLooperShadow.idle()
+        if (condition()) return true
+        Thread.sleep(25L)
+        mainLooperShadow.idleFor(java.time.Duration.ofMillis(25))
+      }
+      mainLooperShadow.idle()
+      return condition()
+    }
+
+    val viewModel = com.example.remote.ui.RemoteViewModel(app)
+    viewModel.connectManualIp("127.0.0.1", serverSocket.localPort, "Bedroom TV")
+
+    assertTrue(
+      "Expected rapid-drop circuit breaker Error after 3 drops, got ${viewModel.uiState.value.connectionStatus}",
+      pumpMainLooperUntil {
+        val status = viewModel.uiState.value.connectionStatus
+        status is com.example.remote.ui.ConnectionStatus.Error && status.isRapidDropLoop
+      },
+    )
+    assertEquals(3, acceptCount.get())
+
+    // Foreground event must respect paused state until user acts
+    viewModel.onAppForegrounded()
+    Thread.sleep(150L)
+    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+    assertEquals(3, acceptCount.get())
+
+    // Explicit Retry clears the circuit breaker and reconnects cleanly
+    viewModel.retryCurrentTarget()
+    assertTrue(
+      "Expected Connected after retryCurrentTarget(), got ${viewModel.uiState.value.connectionStatus}",
+      pumpMainLooperUntil {
+        viewModel.uiState.value.connectionStatus is com.example.remote.ui.ConnectionStatus.Connected
+      },
+    )
+    assertEquals(4, acceptCount.get())
+
+    keepFourthAlive.countDown()
+    viewModel.disconnect()
+    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+    serverThread.join(1_500L)
+  }
+
+  @Test
+  fun `viewModel onKeyHoldStart and onKeyHoldEnd emit START_LONG and END_LONG key events`() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val certManager = CertificateManager(app)
+    val serverKeyStore = certManager.ensureClientIdentity()
+    val kmf =
+      javax.net.ssl.KeyManagerFactory.getInstance(
+        javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
+      ).apply {
+        init(serverKeyStore, "yvtv_remote_keystore_pass".toCharArray())
+      }
+    val trustAll =
+      object : javax.net.ssl.X509TrustManager {
+        override fun checkClientTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+
+        override fun checkServerTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+
+        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+      }
+    val serverSslContext =
+      javax.net.ssl.SSLContext.getInstance("TLS").apply {
+        init(kmf.keyManagers, arrayOf<javax.net.ssl.TrustManager>(trustAll), null)
+      }
+    val serverSocket =
+      (serverSslContext.serverSocketFactory.createServerSocket(0) as javax.net.ssl.SSLServerSocket)
+        .apply {
+          needClientAuth = false
+        }
+
+    val receivedKeys =
+      java.util.Collections.synchronizedList(
+        mutableListOf<Pair<com.example.proto.remote.RemoteKeyCode, com.example.proto.remote.RemoteDirection>>()
+      )
+    val bothReceivedLatch = java.util.concurrent.CountDownLatch(2)
+
+    val serverThread =
+      Thread {
+        try {
+          val client = serverSocket.accept() as javax.net.ssl.SSLSocket
+          client.startHandshake()
+          val configureMsg =
+            com.example.proto.remote.RemoteMessage.newBuilder()
+              .setRemoteConfigure(
+                com.example.proto.remote.RemoteConfigure.newBuilder()
+                  .setCode1(622)
+                  .build()
+              )
+              .build()
+          com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, configureMsg)
+
+          val input = client.inputStream
+          while (!client.isClosed) {
+            val frame = com.example.remote.protocol.DelimitedStreamHelper.readDelimitedBytes(input) ?: break
+            val msg = com.example.proto.remote.RemoteMessage.parseFrom(frame)
+            if (msg.hasRemoteKeyInject()) {
+              val inject = msg.remoteKeyInject
+              receivedKeys.add(inject.keyCode to inject.direction)
+              bothReceivedLatch.countDown()
+            }
+          }
+          client.close()
+        } catch (_: Throwable) {
+        } finally {
+          try {
+            serverSocket.close()
+          } catch (_: Exception) {
+          }
+        }
+      }.apply { start() }
+
+    fun pumpMainLooperUntil(timeoutMs: Long = 5_000L, condition: () -> Boolean): Boolean {
+      val mainLooperShadow = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+      val deadline = System.currentTimeMillis() + timeoutMs
+      while (System.currentTimeMillis() < deadline) {
+        mainLooperShadow.idle()
+        if (condition()) return true
+        Thread.sleep(25L)
+        mainLooperShadow.idleFor(java.time.Duration.ofMillis(25))
+      }
+      mainLooperShadow.idle()
+      return condition()
+    }
+
+    val viewModel = com.example.remote.ui.RemoteViewModel(app)
+    viewModel.connectManualIp("127.0.0.1", serverSocket.localPort, "Living Room TV")
+    assertTrue(
+      pumpMainLooperUntil {
+        viewModel.uiState.value.connectionStatus is com.example.remote.ui.ConnectionStatus.Connected
+      }
+    )
+
+    viewModel.onKeyHoldStart(com.example.proto.remote.RemoteKeyCode.KEYCODE_MEDIA_FAST_FORWARD)
+    Thread.sleep(60L)
+    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+    viewModel.onKeyHoldEnd(com.example.proto.remote.RemoteKeyCode.KEYCODE_MEDIA_FAST_FORWARD)
+
+    assertTrue(
+      "Expected START_LONG and END_LONG key events received, got $receivedKeys",
+      bothReceivedLatch.await(3, java.util.concurrent.TimeUnit.SECONDS),
+    )
+    assertEquals(
+      com.example.proto.remote.RemoteKeyCode.KEYCODE_MEDIA_FAST_FORWARD to com.example.proto.remote.RemoteDirection.START_LONG,
+      receivedKeys[0],
+    )
+    assertEquals(
+      com.example.proto.remote.RemoteKeyCode.KEYCODE_MEDIA_FAST_FORWARD to com.example.proto.remote.RemoteDirection.END_LONG,
+      receivedKeys[1],
+    )
+
+    viewModel.disconnect()
+    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+    serverThread.join(1_500L)
+  }
+
+  @Test
+  fun `viewModel executes spoken TV key, TV assistant, and voice protobuf streaming cleanly`() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val certManager = CertificateManager(app)
+    val serverKeyStore = certManager.ensureClientIdentity()
+    val kmf =
+      javax.net.ssl.KeyManagerFactory.getInstance(
+        javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
+      ).apply {
+        init(serverKeyStore, "yvtv_remote_keystore_pass".toCharArray())
+      }
+    val trustAll =
+      object : javax.net.ssl.X509TrustManager {
+        override fun checkClientTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+
+        override fun checkServerTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+
+        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+      }
+    val serverSslContext =
+      javax.net.ssl.SSLContext.getInstance("TLS").apply {
+        init(kmf.keyManagers, arrayOf<javax.net.ssl.TrustManager>(trustAll), null)
+      }
+    val serverSocket =
+      (serverSslContext.serverSocketFactory.createServerSocket(0) as javax.net.ssl.SSLServerSocket)
+        .apply {
+          needClientAuth = false
+        }
+
+    val receivedKeyCodes =
+      java.util.Collections.synchronizedList(mutableListOf<com.example.proto.remote.RemoteKeyCode>())
+    val assistantAndKeysLatch = java.util.concurrent.CountDownLatch(3)
+
+    val serverThread =
+      Thread {
+        try {
+          val client = serverSocket.accept() as javax.net.ssl.SSLSocket
+          client.startHandshake()
+          val configureMsg =
+            com.example.proto.remote.RemoteMessage.newBuilder()
+              .setRemoteConfigure(
+                com.example.proto.remote.RemoteConfigure.newBuilder()
+                  .setCode1(622)
+                  .build()
+              )
+              .build()
+          com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, configureMsg)
+
+          val input = client.inputStream
+          while (!client.isClosed) {
+            val frame = com.example.remote.protocol.DelimitedStreamHelper.readDelimitedBytes(input) ?: break
+            val msg = com.example.proto.remote.RemoteMessage.parseFrom(frame)
+            if (msg.hasRemoteKeyInject()) {
+              receivedKeyCodes.add(msg.remoteKeyInject.keyCode)
+              assistantAndKeysLatch.countDown()
+            }
+          }
+          client.close()
+        } catch (_: Throwable) {
+        } finally {
+          try {
+            serverSocket.close()
+          } catch (_: Exception) {
+          }
+        }
+      }.apply { start() }
+
+    fun pumpMainLooperUntil(timeoutMs: Long = 5_000L, condition: () -> Boolean): Boolean {
+      val mainLooperShadow = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+      val deadline = System.currentTimeMillis() + timeoutMs
+      while (System.currentTimeMillis() < deadline) {
+        mainLooperShadow.idle()
+        if (condition()) return true
+        Thread.sleep(25L)
+        mainLooperShadow.idleFor(java.time.Duration.ofMillis(25))
+      }
+      mainLooperShadow.idle()
+      return condition()
+    }
+
+    val viewModel = com.example.remote.ui.RemoteViewModel(app)
+    viewModel.connectManualIp("127.0.0.1", serverSocket.localPort, "Living Room TV")
+    assertTrue(
+      pumpMainLooperUntil {
+        viewModel.uiState.value.connectionStatus is com.example.remote.ui.ConnectionStatus.Connected
+      }
+    )
+
+    viewModel.onVoiceFinalResult("volume up")
+    viewModel.triggerTvVoiceAssistant()
+    viewModel.onVoiceFinalResult("search up")
+    assertTrue(
+      "Expected voice key and assistant commands to arrive, got $receivedKeyCodes",
+      assistantAndKeysLatch.await(4, java.util.concurrent.TimeUnit.SECONDS),
+    )
+    assertTrue(receivedKeyCodes.contains(com.example.proto.remote.RemoteKeyCode.KEYCODE_VOLUME_UP))
+    assertTrue(receivedKeyCodes.contains(com.example.proto.remote.RemoteKeyCode.KEYCODE_VOICE_ASSIST))
+    assertTrue(receivedKeyCodes.contains(com.example.proto.remote.RemoteKeyCode.KEYCODE_SEARCH))
+    assertEquals("search up", viewModel.uiState.value.voiceState.lastTranscript)
+
+    viewModel.disconnect()
+    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+    serverThread.join(1_500L)
+  }
 }

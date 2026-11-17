@@ -14,6 +14,9 @@ import com.example.proto.remote.RemoteMessage
 import com.example.proto.remote.RemotePingRequest
 import com.example.proto.remote.RemotePingResponse
 import com.example.proto.remote.RemoteSetActive
+import com.example.proto.remote.RemoteVoiceBegin
+import com.example.proto.remote.RemoteVoiceEnd
+import com.example.proto.remote.RemoteVoicePayload
 import com.example.remote.data.OttLaunchPlan
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -87,14 +90,20 @@ class RemoteControlClient(
   private val _appLinkErrors = MutableSharedFlow<String>(extraBufferCapacity = 32)
   val appLinkErrors: SharedFlow<String> = _appLinkErrors.asSharedFlow()
 
+  private val _voiceSessionRequest = MutableStateFlow<Int?>(null)
+  val voiceSessionRequest: StateFlow<Int?> = _voiceSessionRequest.asStateFlow()
+
   private val writeMutex = Mutex()
+  private val appLinkLaunchMutex = Mutex()
   private var scope: CoroutineScope? = null
   private var readerJob: Job? = null
   private var keepaliveJob: Job? = null
   @Volatile private var socket: SSLSocket? = null
   @Volatile private var outputStream: OutputStream? = null
   @Volatile private var lastInboundAtMs: Long = 0L
-  @Volatile private var serverSupportsPingFlow: Boolean = false
+  @Volatile private var serverAnswersClientPings: Boolean = false
+  @Volatile private var activeAppLinkProbe: String? = null
+  private val unansweredClientPings = AtomicInteger(0)
   private val pingSequence = AtomicInteger(1)
 
   fun isConnectionHealthy(): Boolean {
@@ -109,6 +118,7 @@ class RemoteControlClient(
     teardownSessionOnly()
     _sessionEvent.value = SessionEvent.Connecting
     _imeState.value = TvImeState()
+    _voiceSessionRequest.value = null
 
     val connectSuccess =
       withContext(Dispatchers.IO) {
@@ -126,7 +136,9 @@ class RemoteControlClient(
           socket = sslSocket
           outputStream = sslSocket.outputStream
           lastInboundAtMs = System.currentTimeMillis()
-          serverSupportsPingFlow = false
+          serverAnswersClientPings = false
+          unansweredClientPings.set(0)
+          activeAppLinkProbe = null
 
           val sessionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
           scope = sessionScope
@@ -166,7 +178,11 @@ class RemoteControlClient(
       if (_sessionEvent.value !is SessionEvent.Connected) continue
 
       val silentMs = System.currentTimeMillis() - lastInboundAtMs
-      if (serverSupportsPingFlow && silentMs >= staleConnectionTimeoutMs) {
+      if (
+        serverAnswersClientPings &&
+        unansweredClientPings.get() >= MIN_UNANSWERED_PINGS_FOR_STALE &&
+        silentMs >= staleConnectionTimeoutMs
+      ) {
         if (sessionScope.isActive && socket === sslSocket) {
           _sessionEvent.value =
             SessionEvent.ConnectionLost("TV did not respond to keepalive heartbeat.")
@@ -182,6 +198,7 @@ class RemoteControlClient(
   }
 
   private suspend fun sendKeepalivePing(targetSocket: SSLSocket? = null): Boolean {
+    unansweredClientPings.incrementAndGet()
     val ping =
       RemoteMessage.newBuilder()
         .setRemotePingRequest(
@@ -196,6 +213,7 @@ class RemoteControlClient(
   private suspend fun runReaderLoop(sslSocket: SSLSocket, sessionScope: CoroutineScope) {
     val input = sslSocket.inputStream
     var hasReceivedMessage = false
+    var sentConfigureReply = false
     var repliedToServerSetActive = false
     try {
       while (sessionScope.isActive && !sslSocket.isClosed && socket === sslSocket) {
@@ -206,7 +224,11 @@ class RemoteControlClient(
             if (!sessionScope.isActive || sslSocket.isClosed || socket !== sslSocket) break
             if (_sessionEvent.value is SessionEvent.Connected) {
               val silentMs = System.currentTimeMillis() - lastInboundAtMs
-              if (serverSupportsPingFlow && silentMs >= staleConnectionTimeoutMs) {
+              if (
+                serverAnswersClientPings &&
+                unansweredClientPings.get() >= MIN_UNANSWERED_PINGS_FOR_STALE &&
+                silentMs >= staleConnectionTimeoutMs
+              ) {
                 throw IOException("TV connection timed out after ${silentMs}ms without heartbeat.")
               }
               if (!sendKeepalivePing(sslSocket)) {
@@ -217,13 +239,19 @@ class RemoteControlClient(
           }
 
         lastInboundAtMs = System.currentTimeMillis()
+        unansweredClientPings.set(0)
         hasReceivedMessage = true
         val message = RemoteMessage.parseFrom(frameBytes)
 
         when {
           message.hasRemoteConfigure() -> {
-            sendConfigureAndActive()
-            _sessionEvent.value = SessionEvent.Connected
+            if (!sentConfigureReply) {
+              sentConfigureReply = true
+              sendConfigureReply()
+            }
+            if (_sessionEvent.value != SessionEvent.Connected) {
+              _sessionEvent.value = SessionEvent.Connected
+            }
           }
           message.hasRemoteSetActive() -> {
             if (!repliedToServerSetActive) {
@@ -235,7 +263,6 @@ class RemoteControlClient(
             }
           }
           message.hasRemotePingRequest() -> {
-            serverSupportsPingFlow = true
             val pingVal = message.remotePingRequest.val1
             val pong =
               RemoteMessage.newBuilder()
@@ -248,7 +275,8 @@ class RemoteControlClient(
             sendRemoteMessage(pong, expectedSocket = sslSocket)
           }
           message.hasRemotePingResponse() -> {
-            serverSupportsPingFlow = true
+            serverAnswersClientPings = true
+            unansweredClientPings.set(0)
           }
           message.hasRemoteImeKeyInject() -> {
             val imeInject = message.remoteImeKeyInject
@@ -286,16 +314,36 @@ class RemoteControlClient(
           message.hasRemoteStart() -> {
             _sessionEvent.value = SessionEvent.Connected
           }
+          message.hasRemoteVoiceBegin() -> {
+            _voiceSessionRequest.value = message.remoteVoiceBegin.sessionId
+          }
+          message.hasRemoteVoiceEnd() -> {
+            _voiceSessionRequest.value = null
+          }
           message.hasRemoteError() -> {
             val err = message.remoteError
-            if (err.hasMessage() && err.message.hasRemoteAppLinkLaunchRequest()) {
-              val failedLink = err.message.remoteAppLinkLaunchRequest.appLink
-              if (failedLink.isNotEmpty()) {
-                _appLinkErrors.tryEmit(failedLink)
+            val echoedLink =
+              if (err.hasMessage() && err.message.hasRemoteAppLinkLaunchRequest()) {
+                err.message.remoteAppLinkLaunchRequest.appLink.trim()
+              } else {
+                ""
               }
-            } else {
-              _sessionEvent.value = SessionEvent.Error("Remote session error reported by TV.")
-              break
+            val currentProbe = activeAppLinkProbe
+            when {
+              echoedLink.isNotEmpty() -> {
+                _appLinkErrors.tryEmit(echoedLink)
+              }
+              currentProbe != null -> {
+                // TV rejected the active OTT launch probe without echoing app_link; treat as non-fatal
+                _appLinkErrors.tryEmit(currentProbe)
+              }
+              _sessionEvent.value is SessionEvent.Connected -> {
+                // Non-fatal command error on an already established session: keep TLS socket open
+              }
+              else -> {
+                _sessionEvent.value = SessionEvent.Error("Remote session error reported by TV.")
+                break
+              }
             }
           }
         }
@@ -336,7 +384,7 @@ class RemoteControlClient(
     }
   }
 
-  private suspend fun sendConfigureAndActive() {
+  private suspend fun sendConfigureReply() {
     val modelName = Build.MODEL.orEmpty().ifBlank { "Android" }
     val vendorName = Build.MANUFACTURER.orEmpty().ifBlank { "Android" }
     val deviceInfo =
@@ -359,7 +407,6 @@ class RemoteControlClient(
         )
         .build()
     sendRemoteMessage(configureReply)
-    sendSetActiveReply()
   }
 
   private suspend fun sendSetActiveReply() {
@@ -439,6 +486,43 @@ class RemoteControlClient(
     _imeState.update { it.copy(isImeRequested = false) }
   }
 
+  suspend fun sendVoiceBegin(sessionId: Int): Boolean {
+    val message =
+      RemoteMessage.newBuilder()
+        .setRemoteVoiceBegin(
+          RemoteVoiceBegin.newBuilder()
+            .setSessionId(sessionId)
+            .build()
+        )
+        .build()
+    return sendRemoteMessage(message)
+  }
+
+  suspend fun sendVoicePayload(pcmData: ByteArray): Boolean {
+    if (pcmData.isEmpty()) return true
+    val message =
+      RemoteMessage.newBuilder()
+        .setRemoteVoicePayload(
+          RemoteVoicePayload.newBuilder()
+            .setData(com.google.protobuf.ByteString.copyFrom(pcmData))
+            .build()
+        )
+        .build()
+    return sendRemoteMessage(message)
+  }
+
+  suspend fun sendVoiceEnd(sessionId: Int): Boolean {
+    val message =
+      RemoteMessage.newBuilder()
+        .setRemoteVoiceEnd(
+          RemoteVoiceEnd.newBuilder()
+            .setSessionId(sessionId)
+            .build()
+        )
+        .build()
+    return sendRemoteMessage(message)
+  }
+
   suspend fun launchApp(appLink: String): Boolean {
     val message =
       RemoteMessage.newBuilder()
@@ -454,37 +538,47 @@ class RemoteControlClient(
   suspend fun launchAppWithPlan(
     plan: OttLaunchPlan,
     errorWaitMs: Long = NATIVE_LAUNCH_ERROR_WAIT_MS,
-  ): OttLaunchOutcome = coroutineScope {
-    for (candidate in plan.nativeCandidates) {
-      val trimmedCandidate = candidate.trim()
-      val errorMonitor =
-        async(start = CoroutineStart.UNDISPATCHED) {
-          withTimeoutOrNull(errorWaitMs) {
-            appLinkErrors.first { it.trim() == trimmedCandidate }
-          } != null
+  ): OttLaunchOutcome =
+    appLinkLaunchMutex.withLock {
+      coroutineScope {
+        for (candidate in plan.nativeCandidates) {
+          val trimmedCandidate = candidate.trim()
+          activeAppLinkProbe = trimmedCandidate
+          try {
+            val errorMonitor =
+              async(start = CoroutineStart.UNDISPATCHED) {
+                withTimeoutOrNull(errorWaitMs) {
+                  appLinkErrors.first { it.trim() == trimmedCandidate }
+                } != null
+              }
+            val sent = launchApp(candidate)
+            if (!sent) {
+              errorMonitor.cancel()
+              return@coroutineScope OttLaunchOutcome.FAILED
+            }
+            val rejectedByTv = errorMonitor.await()
+            if (!rejectedByTv) {
+              return@coroutineScope OttLaunchOutcome.LAUNCHED_NATIVE_APP
+            }
+          } finally {
+            if (activeAppLinkProbe == trimmedCandidate) {
+              activeAppLinkProbe = null
+            }
+          }
         }
-      val sent = launchApp(candidate)
-      if (!sent) {
-        errorMonitor.cancel()
-        return@coroutineScope OttLaunchOutcome.FAILED
-      }
-      val rejectedByTv = errorMonitor.await()
-      if (!rejectedByTv) {
-        return@coroutineScope OttLaunchOutcome.LAUNCHED_NATIVE_APP
-      }
-    }
 
-    val fallback = plan.browserFallback
-    if (!fallback.isNullOrBlank()) {
-      return@coroutineScope if (launchApp(fallback)) {
-        OttLaunchOutcome.OPENED_IN_BROWSER
-      } else {
+        val fallback = plan.browserFallback
+        if (!fallback.isNullOrBlank()) {
+          return@coroutineScope if (launchApp(fallback)) {
+            OttLaunchOutcome.OPENED_IN_BROWSER
+          } else {
+            OttLaunchOutcome.FAILED
+          }
+        }
+
         OttLaunchOutcome.FAILED
       }
     }
-
-    OttLaunchOutcome.FAILED
-  }
 
   private suspend fun sendRemoteMessage(
     message: RemoteMessage,
@@ -542,6 +636,7 @@ class RemoteControlClient(
   fun disconnect() {
     teardownSessionOnly()
     _imeState.value = TvImeState()
+    _voiceSessionRequest.value = null
     _sessionEvent.value = SessionEvent.Disconnected
   }
 
@@ -550,6 +645,8 @@ class RemoteControlClient(
     if (expectedSocket != null && current !== expectedSocket) {
       return
     }
+    activeAppLinkProbe = null
+    _voiceSessionRequest.value = null
     outputStream = null
     try {
       current?.close()
@@ -560,11 +657,12 @@ class RemoteControlClient(
 
   companion object {
     const val DEFAULT_REMOTE_PORT = 6466
-    const val NATIVE_LAUNCH_ERROR_WAIT_MS = 380L
-    const val DEFAULT_KEEPALIVE_INTERVAL_MS = 10_000L
-    const val DEFAULT_SOCKET_READ_TIMEOUT_MS = 25_000
-    const val DEFAULT_STALE_CONNECTION_TIMEOUT_MS = 35_000L
-    private const val FEATURE_CODE_FULL = 622
+    const val NATIVE_LAUNCH_ERROR_WAIT_MS = 420L
+    const val DEFAULT_KEEPALIVE_INTERVAL_MS = 12_000L
+    const val DEFAULT_SOCKET_READ_TIMEOUT_MS = 30_000
+    const val DEFAULT_STALE_CONNECTION_TIMEOUT_MS = 60_000L
+    private const val MIN_UNANSWERED_PINGS_FOR_STALE = 2
+    private const val FEATURE_CODE_FULL = 639
     private const val CONNECT_TIMEOUT_MS = 8_000
 
     fun isCertificateOrHandshakeError(error: SSLException): Boolean {

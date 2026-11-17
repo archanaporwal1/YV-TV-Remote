@@ -94,6 +94,24 @@ class MainActivityLaunchTest {
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithTag("dpad_center").assertIsDisplayed()
 
+    // Verify Microphone Voice Command bar & Voice Command Sheet
+    composeTestRule.onNodeWithTag("btn_voice_mic").performScrollTo().assertIsDisplayed()
+    composeTestRule.onNodeWithTag("btn_tv_voice_assist").performScrollTo().assertIsDisplayed()
+    composeTestRule.onNodeWithTag("btn_voice_mic").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("voice_command_sheet").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("voice_command_sheet")
+      .performScrollToNode(hasTestTag("voice_quick_prompts_row"))
+    composeTestRule.onNodeWithTag("voice_chip_volume_up").performScrollTo().performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("voice_command_sheet")
+      .performScrollToNode(hasTestTag("voice_transcript_card"))
+    composeTestRule.onNodeWithTag("voice_executed_label").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("voice_command_sheet")
+      .performScrollToNode(hasTestTag("voice_sheet_close_button"))
+    composeTestRule.onNodeWithTag("voice_sheet_close_button").performClick()
+    composeTestRule.waitForIdle()
+
     // Open Keyboard sheet and close it cleanly
     composeTestRule.onNodeWithTag("btn_open_keyboard").performClick()
     composeTestRule.waitForIdle()

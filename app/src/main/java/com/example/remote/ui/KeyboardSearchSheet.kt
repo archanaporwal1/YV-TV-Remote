@@ -2,6 +2,7 @@ package com.example.remote.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -47,6 +48,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.testTag
@@ -66,6 +68,9 @@ fun KeyboardSearchSheet(
   onLiveImeChange: (newText: String, previousText: String) -> Unit,
   onSubmitSearch: (text: String, useDirectKeys: Boolean) -> Unit,
   onSendKey: (RemoteKeyCode, FeedbackCue) -> Unit,
+  onKeyHoldStart: (RemoteKeyCode, FeedbackCue) -> Unit = { _, _ -> },
+  onKeyHoldEnd: (RemoteKeyCode) -> Unit = {},
+  onOpenVoiceInput: () -> Unit = {},
 ) {
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
   val focusRequester = remember { FocusRequester() }
@@ -270,7 +275,7 @@ fun KeyboardSearchSheet(
         KeyboardQuickActionChip(
           icon = Icons.Rounded.Mic,
           label = "Voice",
-          onClick = { onSendKey(RemoteKeyCode.KEYCODE_VOICE_ASSIST, FeedbackCue.POWER_OR_APP) },
+          onClick = { onOpenVoiceInput() },
           modifier = Modifier.weight(1f).testTag("keyboard_voice_btn"),
         )
         KeyboardQuickActionChip(
@@ -293,6 +298,20 @@ fun KeyboardSearchSheet(
             }
             onSendKey(RemoteKeyCode.KEYCODE_DEL, FeedbackCue.BACK_HOME)
           },
+          onHoldStart = {
+            if (!useDirectKeys && query.isNotEmpty()) {
+              val prev = query
+              query = ""
+              onLiveImeChange("", prev)
+            } else {
+              onKeyHoldStart(RemoteKeyCode.KEYCODE_DEL, FeedbackCue.BACK_HOME)
+            }
+          },
+          onHoldEnd = {
+            if (useDirectKeys || query.isEmpty()) {
+              onKeyHoldEnd(RemoteKeyCode.KEYCODE_DEL)
+            }
+          },
           modifier = Modifier.weight(1f).testTag("keyboard_backspace_btn"),
         )
         KeyboardQuickActionChip(
@@ -311,13 +330,26 @@ private fun KeyboardQuickActionChip(
   icon: androidx.compose.ui.graphics.vector.ImageVector,
   label: String,
   onClick: () -> Unit,
+  onHoldStart: (() -> Unit)? = null,
+  onHoldEnd: (() -> Unit)? = null,
   modifier: Modifier = Modifier,
 ) {
+  val interactionSource = remember { MutableInteractionSource() }
   Surface(
     color = MaterialTheme.colorScheme.surfaceVariant,
     shape = RoundedCornerShape(14.dp),
     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    modifier = modifier.height(50.dp).clickable(onClick = onClick),
+    modifier =
+      modifier
+        .height(50.dp)
+        .clip(RoundedCornerShape(14.dp))
+        .holdableRemoteGesture(
+          interactionSource = interactionSource,
+          contentDescription = label,
+          onClick = onClick,
+          onHoldStart = onHoldStart,
+          onHoldEnd = onHoldEnd,
+        ),
   ) {
     Column(
       horizontalAlignment = Alignment.CenterHorizontally,

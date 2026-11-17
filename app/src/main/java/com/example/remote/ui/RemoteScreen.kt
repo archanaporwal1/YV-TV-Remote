@@ -1,8 +1,10 @@
 package com.example.remote.ui
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Build
+import android.speech.RecognizerIntent
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -38,20 +40,26 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CastConnected
 import androidx.compose.material.icons.rounded.Keyboard
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.Tv
+import androidx.compose.material.icons.rounded.WarningAmber
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -79,6 +87,7 @@ import com.example.remote.data.TvAppShortcut
 import com.example.remote.data.UserProfile
 import com.example.remote.discovery.DiscoveredTv
 import com.example.remote.feedback.FeedbackCue
+import com.example.remote.voice.AndroidSpeechRecognizerController
 import com.example.ui.theme.AmberStatus
 
 @Composable
@@ -132,12 +141,99 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
       contract = ActivityResultContracts.RequestPermission()
     ) { _ -> }
 
+  var hasMicPermission by remember {
+    mutableStateOf(
+      ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+        PackageManager.PERMISSION_GRANTED
+    )
+  }
+
+  val speechController =
+    remember(context) {
+      AndroidSpeechRecognizerController(
+        context = context,
+        onReady = { viewModel.onVoiceListeningStarted() },
+        onRmsChanged = { level -> viewModel.onVoiceRmsChanged(level) },
+        onPartialResult = { partial -> viewModel.onVoicePartialResult(partial) },
+        onFinalResult = { transcript -> viewModel.onVoiceFinalResult(transcript) },
+        onError = { errMsg -> viewModel.onVoiceError(errMsg) },
+      )
+    }
+
+  DisposableEffect(speechController) {
+    onDispose { speechController.destroy() }
+  }
+
+  val fallbackSpeechLauncher =
+    rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+      if (result.resultCode == Activity.RESULT_OK) {
+        val spoken =
+          result.data
+            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            ?.trim()
+        if (!spoken.isNullOrEmpty()) {
+          viewModel.onVoiceFinalResult(spoken)
+        }
+      }
+    }
+
+  val launchSpeechCapture: () -> Unit = {
+    if (speechController.isAvailable()) {
+      viewModel.onVoiceListeningStarted()
+      speechController.startListening()
+    } else {
+      val fallbackIntent = AndroidSpeechRecognizerController.buildFallbackActivityIntent()
+      val canResolve = fallbackIntent.resolveActivity(context.packageManager) != null
+      if (canResolve) {
+        runCatching { fallbackSpeechLauncher.launch(fallbackIntent) }
+          .onFailure {
+            viewModel.onVoiceError("On-device speech service is unavailable. Use TV Assistant or type a command below.")
+          }
+      } else {
+        viewModel.onVoiceError("Speech recognition service is unavailable on this phone. Use TV Assistant or type a command below.")
+      }
+    }
+  }
+
+  val micPermissionLauncher =
+    rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+      hasMicPermission = granted
+      if (granted) {
+        launchSpeechCapture()
+      } else {
+        viewModel.onVoiceError("Microphone permission denied. Allow Mic or tap TV Assistant.")
+      }
+    }
+
+  val triggerVoiceInputFlow: () -> Unit = {
+    viewModel.openVoiceSheet(true)
+    if (hasMicPermission) {
+      launchSpeechCapture()
+    } else {
+      micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+    }
+  }
+
   val lifecycleOwner = LocalLifecycleOwner.current
   DisposableEffect(lifecycleOwner) {
     val observer = LifecycleEventObserver { _, event ->
       when (event) {
-        Lifecycle.Event.ON_START -> viewModel.onAppForegrounded()
-        Lifecycle.Event.ON_STOP -> viewModel.onAppBackgrounded()
+        Lifecycle.Event.ON_START -> {
+          hasMicPermission =
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+              PackageManager.PERMISSION_GRANTED
+          viewModel.onAppForegrounded()
+        }
+        Lifecycle.Event.ON_STOP -> {
+          speechController.stopListening()
+          viewModel.onVoiceListeningStopped()
+          viewModel.onAppBackgrounded()
+        }
         else -> Unit
       }
     }
@@ -208,6 +304,7 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
             onSaveDiscoveredTv = { discoveredToSave = it },
             onDownloadUpdate = { viewModel.downloadAvailableUpdate() },
             onOpenUpdateDetails = { viewModel.openUpdateDialog(true) },
+            onRepairConnection = { viewModel.repairCurrentTarget() },
           )
         } else {
           RemoteControlScreen(
@@ -216,12 +313,18 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
             onOpenCustomizeUi = { viewModel.openCustomizeUiSheet(true) },
             onOpenSettings = { viewModel.openSettingsSheet(true) },
             onOpenKeyboard = { viewModel.openKeyboardSheet(true) },
+            onOpenVoiceInput = triggerVoiceInputFlow,
+            onTriggerTvVoiceAssistant = { viewModel.triggerTvVoiceAssistant() },
             onSwitchInputMode = { viewModel.setInputMode(it) },
             onSendKey = { keyCode, cue -> viewModel.sendKey(keyCode, cue) },
+            onKeyHoldStart = { keyCode, cue -> viewModel.onKeyHoldStart(keyCode, cue) },
+            onKeyHoldEnd = { keyCode -> viewModel.onKeyHoldEnd(keyCode) },
             onLaunchShortcut = { viewModel.launchShortcut(it) },
             onOpenAddOttDialog = { showAddOttDialog = true },
             onDownloadUpdate = { viewModel.downloadAvailableUpdate() },
             onOpenUpdateDetails = { viewModel.openUpdateDialog(true) },
+            onRetryConnection = { viewModel.retryCurrentTarget() },
+            onRepairConnection = { viewModel.repairCurrentTarget() },
           )
         }
       }
@@ -437,6 +540,44 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
         viewModel.submitKeyboardSearch(text, useDirectKeys)
       },
       onSendKey = { keyCode, cue -> viewModel.sendKeyboardKey(keyCode, cue) },
+      onKeyHoldStart = { keyCode, cue -> viewModel.onKeyHoldStart(keyCode, cue) },
+      onKeyHoldEnd = { keyCode -> viewModel.onKeyHoldEnd(keyCode) },
+      onOpenVoiceInput = {
+        viewModel.openKeyboardSheet(false)
+        triggerVoiceInputFlow()
+      },
+    )
+  }
+
+  if (uiState.voiceState.showVoiceSheet) {
+    VoiceCommandSheet(
+      voiceState = uiState.voiceState,
+      hasMicPermission = hasMicPermission,
+      isSpeechRecognizerAvailable = speechController.isAvailable(),
+      onDismiss = {
+        speechController.stopListening()
+        viewModel.openVoiceSheet(false)
+      },
+      onStartListening = {
+        if (hasMicPermission) {
+          launchSpeechCapture()
+        } else {
+          micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+      },
+      onStopListening = {
+        speechController.stopListening()
+        viewModel.onVoiceListeningStopped()
+      },
+      onRequestMicPermission = {
+        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+      },
+      onTriggerTvAssistant = {
+        viewModel.triggerTvVoiceAssistant()
+      },
+      onRunVoiceCommandText = { phrase ->
+        viewModel.onVoiceFinalResult(phrase)
+      },
     )
   }
 }
@@ -448,12 +589,18 @@ fun RemoteControlScreen(
   onOpenCustomizeUi: () -> Unit,
   onOpenSettings: () -> Unit,
   onOpenKeyboard: () -> Unit,
+  onOpenVoiceInput: () -> Unit = {},
+  onTriggerTvVoiceAssistant: () -> Unit = {},
   onSwitchInputMode: (RemoteInputMode) -> Unit,
   onSendKey: (RemoteKeyCode, FeedbackCue) -> Unit,
+  onKeyHoldStart: (RemoteKeyCode, FeedbackCue) -> Unit = { _, _ -> },
+  onKeyHoldEnd: (RemoteKeyCode) -> Unit = {},
   onLaunchShortcut: (TvAppShortcut) -> Unit,
   onOpenAddOttDialog: () -> Unit,
   onDownloadUpdate: () -> Unit,
   onOpenUpdateDetails: () -> Unit,
+  onRetryConnection: () -> Unit = {},
+  onRepairConnection: () -> Unit = {},
 ) {
   val uiPrefs = uiState.uiPreferences
   val compact = uiPrefs.compactMode
@@ -492,6 +639,16 @@ fun RemoteControlScreen(
           modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(vertical = 4.dp),
           verticalArrangement = Arrangement.spacedBy(sectionSpacing),
         ) {
+        val errorStatus = uiState.connectionStatus as? ConnectionStatus.Error
+        AnimatedVisibility(visible = errorStatus != null) {
+          errorStatus?.let { err ->
+            RemoteDiagnosticBanner(
+              error = err,
+              onRepairClick = onRepairConnection,
+              onRetryClick = onRetryConnection,
+            )
+          }
+        }
 
         uiState.availableUpdate?.let { release ->
           UpdateAvailableBannerCard(
@@ -520,13 +677,30 @@ fun RemoteControlScreen(
                 onOpenKeyboard = onOpenKeyboard,
                 onOpenSearch = { onSendKey(RemoteKeyCode.KEYCODE_SEARCH, FeedbackCue.CONFIRM_CHIME) },
               )
+              VoiceCommandBar(
+                isListening = uiState.voiceState.isListening,
+                lastTranscript = uiState.voiceState.lastTranscript,
+                compact = compact,
+                onOpenVoiceInput = onOpenVoiceInput,
+                onTriggerTvAssistant = onTriggerTvVoiceAssistant,
+              )
               if (uiState.inputMode == RemoteInputMode.DPAD) {
-                ClassicDPadPod(onKey = onSendKey, compact = compact)
+                ClassicDPadPod(
+                  onKey = onSendKey,
+                  onKeyHoldStart = onKeyHoldStart,
+                  onKeyHoldEnd = onKeyHoldEnd,
+                  compact = compact,
+                )
               } else {
                 TouchpadSurfacePod(onKey = onSendKey, compact = compact)
               }
               AnimatedVisibility(visible = uiPrefs.showNavigationRow) {
-                PrimaryNavigationRow(onKey = onSendKey, compact = compact)
+                PrimaryNavigationRow(
+                  onKey = onSendKey,
+                  onKeyHoldStart = onKeyHoldStart,
+                  onKeyHoldEnd = onKeyHoldEnd,
+                  compact = compact,
+                )
               }
             }
 
@@ -535,10 +709,20 @@ fun RemoteControlScreen(
               verticalArrangement = Arrangement.spacedBy(sectionSpacing),
             ) {
               AnimatedVisibility(visible = uiPrefs.showVolumeAndChannel) {
-                VolumeAndChannelPod(onKey = onSendKey, compact = compact)
+                VolumeAndChannelPod(
+                  onKey = onSendKey,
+                  onKeyHoldStart = onKeyHoldStart,
+                  onKeyHoldEnd = onKeyHoldEnd,
+                  compact = compact,
+                )
               }
               AnimatedVisibility(visible = uiPrefs.showMediaTransport) {
-                MediaTransportBar(onKey = onSendKey, compact = compact)
+                MediaTransportBar(
+                  onKey = onSendKey,
+                  onKeyHoldStart = onKeyHoldStart,
+                  onKeyHoldEnd = onKeyHoldEnd,
+                  compact = compact,
+                )
               }
               AnimatedVisibility(visible = uiPrefs.showStreamingShortcuts) {
                 StreamingShortcutsGrid(
@@ -566,21 +750,48 @@ fun RemoteControlScreen(
               onOpenKeyboard = onOpenKeyboard,
               onOpenSearch = { onSendKey(RemoteKeyCode.KEYCODE_SEARCH, FeedbackCue.CONFIRM_CHIME) },
             )
+            VoiceCommandBar(
+              isListening = uiState.voiceState.isListening,
+              lastTranscript = uiState.voiceState.lastTranscript,
+              compact = compact,
+              onOpenVoiceInput = onOpenVoiceInput,
+              onTriggerTvAssistant = onTriggerTvVoiceAssistant,
+            )
 
             if (uiState.inputMode == RemoteInputMode.DPAD) {
-              ClassicDPadPod(onKey = onSendKey, compact = compact)
+              ClassicDPadPod(
+                onKey = onSendKey,
+                onKeyHoldStart = onKeyHoldStart,
+                onKeyHoldEnd = onKeyHoldEnd,
+                compact = compact,
+              )
             } else {
               TouchpadSurfacePod(onKey = onSendKey, compact = compact)
             }
 
             AnimatedVisibility(visible = uiPrefs.showNavigationRow) {
-              PrimaryNavigationRow(onKey = onSendKey, compact = compact)
+              PrimaryNavigationRow(
+                onKey = onSendKey,
+                onKeyHoldStart = onKeyHoldStart,
+                onKeyHoldEnd = onKeyHoldEnd,
+                compact = compact,
+              )
             }
             AnimatedVisibility(visible = uiPrefs.showVolumeAndChannel) {
-              VolumeAndChannelPod(onKey = onSendKey, compact = compact)
+              VolumeAndChannelPod(
+                onKey = onSendKey,
+                onKeyHoldStart = onKeyHoldStart,
+                onKeyHoldEnd = onKeyHoldEnd,
+                compact = compact,
+              )
             }
             AnimatedVisibility(visible = uiPrefs.showMediaTransport) {
-              MediaTransportBar(onKey = onSendKey, compact = compact)
+              MediaTransportBar(
+                onKey = onSendKey,
+                onKeyHoldStart = onKeyHoldStart,
+                onKeyHoldEnd = onKeyHoldEnd,
+                compact = compact,
+              )
             }
             AnimatedVisibility(visible = uiPrefs.showStreamingShortcuts) {
               StreamingShortcutsGrid(
@@ -596,6 +807,80 @@ fun RemoteControlScreen(
         }
 
           Spacer(Modifier.height(12.dp))
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun RemoteDiagnosticBanner(
+  error: ConnectionStatus.Error,
+  onRepairClick: () -> Unit,
+  onRetryClick: () -> Unit,
+) {
+  Surface(
+    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.72f),
+    shape = RoundedCornerShape(18.dp),
+    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.6f)),
+    modifier = Modifier.fillMaxWidth().testTag("remote_diagnostic_banner"),
+  ) {
+    Column(
+      modifier = Modifier.padding(14.dp),
+      verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+      ) {
+        Icon(
+          imageVector = Icons.Rounded.WarningAmber,
+          contentDescription = "Connection diagnostic alert",
+          tint = MaterialTheme.colorScheme.error,
+          modifier = Modifier.size(22.dp),
+        )
+        Column(modifier = Modifier.weight(1f)) {
+          Text(
+            text =
+              if (error.isRapidDropLoop) "Auto-Reconnect Paused"
+              else "TV Connection Interrupted",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onErrorContainer,
+          )
+          Text(
+            text = error.diagnosticDetail ?: error.message,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.9f),
+          )
+        }
+      }
+
+      if (error.targetIp != null) {
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          Button(
+            onClick = onRepairClick,
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+            modifier = Modifier.weight(1f).height(48.dp).testTag("remote_diagnostic_repair_button"),
+          ) {
+            Text("Re-pair TV", maxLines = 1, softWrap = false)
+          }
+          OutlinedButton(
+            onClick = onRetryClick,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+            modifier = Modifier.weight(1f).height(48.dp).testTag("remote_diagnostic_retry_button"),
+          ) {
+            Text(
+              text = "Retry",
+              color = MaterialTheme.colorScheme.onErrorContainer,
+              maxLines = 1,
+              softWrap = false,
+            )
+          }
         }
       }
     }
@@ -796,6 +1081,104 @@ private fun ModeAndKeyboardHeaderRow(
             modifier = Modifier.size(20.dp),
           )
         }
+      }
+    }
+  }
+}
+
+@Composable
+private fun VoiceCommandBar(
+  isListening: Boolean,
+  lastTranscript: String,
+  compact: Boolean,
+  onOpenVoiceInput: () -> Unit,
+  onTriggerTvAssistant: () -> Unit,
+) {
+  val barHeight = if (compact) 48.dp else 52.dp
+  Row(
+    modifier = Modifier.fillMaxWidth(),
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Surface(
+      color =
+        if (isListening) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
+      shape = RoundedCornerShape(16.dp),
+      border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.65f)),
+      modifier =
+        Modifier
+          .weight(1f)
+          .height(barHeight)
+          .clip(RoundedCornerShape(16.dp))
+          .clickable(onClick = onOpenVoiceInput)
+          .testTag("btn_voice_mic"),
+    ) {
+      Row(
+        modifier = Modifier.padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+      ) {
+        Icon(
+          imageVector = Icons.Rounded.Mic,
+          contentDescription = "Voice Command Microphone",
+          tint =
+            if (isListening) MaterialTheme.colorScheme.onPrimary
+            else MaterialTheme.colorScheme.primary,
+          modifier = Modifier.size(22.dp),
+        )
+        Column(modifier = Modifier.weight(1f)) {
+          Text(
+            text = if (isListening) "Listening…" else "Voice Command",
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Bold,
+            color =
+              if (isListening) MaterialTheme.colorScheme.onPrimary
+              else MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+          Text(
+            text =
+              if (lastTranscript.isNotBlank()) "Last: \"$lastTranscript\""
+              else "Speak to control, open apps, or search TV",
+            style = MaterialTheme.typography.labelSmall,
+            color =
+              if (isListening) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f)
+              else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+      }
+    }
+
+    TactileKeyButton(
+      onClick = onTriggerTvAssistant,
+      contentDescription = "TV Assistant",
+      shape = RoundedCornerShape(16.dp),
+      containerColor = MaterialTheme.colorScheme.surface,
+      borderColor = MaterialTheme.colorScheme.outlineVariant,
+      modifier = Modifier.height(barHeight).testTag("btn_tv_voice_assist"),
+    ) {
+      Row(
+        modifier = Modifier.padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+      ) {
+        Icon(
+          imageVector = Icons.Rounded.Tv,
+          contentDescription = "TV Assistant",
+          tint = MaterialTheme.colorScheme.primary,
+          modifier = Modifier.size(18.dp),
+        )
+        Text(
+          text = "Assistant",
+          style = MaterialTheme.typography.labelMedium,
+          color = MaterialTheme.colorScheme.onSurface,
+          maxLines = 1,
+          softWrap = false,
+        )
       }
     }
   }

@@ -49,13 +49,13 @@ jobs:
           sed -i 's/signingConfig = signingConfigs.getByName("release")//g' app/build.gradle.kts || true
           sed -i 's/signingConfig signingConfigs.release//g' app/build.gradle.kts || true
           printf 'allprojects{plugins.withId("com.android.application"){android{defaultConfig{versionCode=%s;versionName="%s"}}}}\n' "${{ github.run_number }}" "$VER" > init.gradle
-          gradle assembleRelease --init-script init.gradle -PAPP_VERSION_CODE=${{ github.run_number }} -PAPP_VERSION_NAME=$VER
+          gradle assembleRelease --init-script init.gradle -PAPP_VERSION_CODE=${{ github.run_number }} -PAPP_VERSION_NAME=$VER -PRELEASE_REPO="${{ github.repository }}"
           BT=$(find $ANDROID_HOME/build-tools -maxdepth 1 | sort -V | tail -n 1)
           APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
           $BT/zipalign -p 4 "$APK" aligned.apk
           $BT/apksigner sign --ks my-upload-key.jks --ks-pass pass:"$PASS" --ks-key-alias "$FINAL_ALIAS" --key-pass pass:"$KEYPASS" --out "YV-TV-Remote-v${VER}.apk" aligned.apk
           NOTES=$(git log -1 --pretty=%s || echo "Automated release")
-          VER="$VER" NOTES="$NOTES" python3 -c 'import json,os;v=os.environ["VER"];r=os.environ["REPO"];open("update-manifest.json","w").write(json.dumps({"versionCode":int("${{ github.run_number }}"),"versionName":v,"title":f"YV TV Remote v{v}","notes":os.environ["NOTES"],"apkUrl":f"https://github.com{r}/releases/download/v{v}/YV-TV-Remote-v{v}.apk"},indent=2))'
+          VER="$VER" NOTES="$NOTES" python3 -c 'import json,os;v=os.environ["VER"];r=os.environ["REPO"].strip("/");open("update-manifest.json","w").write(json.dumps({"versionCode":int("${{ github.run_number }}"),"versionName":v,"tag":f"v{v}","title":f"YV TV Remote v{v}","notes":os.environ["NOTES"],"apkUrl":f"https://github.com/{r}/releases/download/v{v}/YV-TV-Remote-v{v}.apk","releaseUrl":f"https://github.com/{r}/releases/tag/v{v}"},indent=2))'
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VER }}

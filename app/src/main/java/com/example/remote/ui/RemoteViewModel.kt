@@ -36,6 +36,9 @@ import com.example.remote.update.AppReleaseInfo
 import com.example.remote.update.AppUpdateManager
 import com.example.remote.update.UpdateCheckJobService
 import com.example.remote.update.UpdateCheckResult
+import com.example.remote.voice.ParsedVoiceCommand
+import com.example.remote.voice.TvVoiceAudioStreamer
+import com.example.remote.voice.VoiceCommandParser
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -81,6 +84,8 @@ sealed class ConnectionStatus {
     val targetIp: String? = null,
     val targetPort: Int = RemoteControlClient.DEFAULT_REMOTE_PORT,
     val targetName: String? = null,
+    val isRapidDropLoop: Boolean = false,
+    val diagnosticDetail: String? = null,
   ) : ConnectionStatus()
 }
 
@@ -90,6 +95,17 @@ data class PendingConnectionTarget(
   val deviceName: String,
   val customName: String,
   val profileId: String,
+)
+
+data class VoiceInputUiState(
+  val showVoiceSheet: Boolean = false,
+  val isListening: Boolean = false,
+  val rmsLevel: Float = 0f,
+  val partialTranscript: String = "",
+  val lastTranscript: String = "",
+  val executedActionLabel: String? = null,
+  val errorMessage: String? = null,
+  val isTvStreamingVoice: Boolean = false,
 )
 
 data class RemoteUiState(
@@ -108,6 +124,7 @@ data class RemoteUiState(
   val showCustomizeUiSheet: Boolean = false,
   val showKeyboardSheet: Boolean = false,
   val tvImeState: TvImeState = TvImeState(),
+  val voiceState: VoiceInputUiState = VoiceInputUiState(),
   val statusBannerMessage: String? = null,
   val availableUpdate: AppReleaseInfo? = null,
   val showUpdateDialog: Boolean = false,
@@ -136,16 +153,37 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   private var autoConnectAttempted = false
   private var postPairingReconnectRetryAvailable = false
   private var unexpectedDisconnectRetryCount = 0
+  private var rapidDropCount = 0
+  private var lastConnectedAtMs = 0L
+  private var autoReconnectPaused = false
+  private var activeHeldKey: RemoteKeyCode? = null
   private var autoReconnectJob: Job? = null
+  private var connectionStabilityJob: Job? = null
   private var ottLaunchJob: Job? = null
   private var networkCallback: ConnectivityManager.NetworkCallback? = null
+  private var hasSeenInitialNetworkCallback = false
   private val reconnectMutex = Mutex()
+
+  private val tvVoiceAudioStreamer =
+    TvVoiceAudioStreamer(
+      context = application,
+      scope = viewModelScope,
+      sendBegin = { sessionId -> remoteClient.sendVoiceBegin(sessionId) },
+      sendPayload = { bytes -> remoteClient.sendVoicePayload(bytes) },
+      sendEnd = { sessionId -> remoteClient.sendVoiceEnd(sessionId) },
+      onStopped = {
+        _uiState.update { state ->
+          state.copy(voiceState = state.voiceState.copy(isTvStreamingVoice = false))
+        }
+      },
+    )
 
   init {
     loadStoredState()
     observeDiscovery()
     observeRemoteSession()
     observeTvImeState()
+    observeVoiceSessionRequests()
     registerNetworkCallback()
     attemptAutoReconnectIfEnabled()
     syncAndCheckUpdatesOnStartup()
@@ -155,6 +193,24 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     viewModelScope.launch {
       remoteClient.imeState.collect { ime ->
         _uiState.update { it.copy(tvImeState = ime) }
+      }
+    }
+  }
+
+  private fun observeVoiceSessionRequests() {
+    viewModelScope.launch {
+      remoteClient.voiceSessionRequest.collect { sessionId ->
+        if (sessionId != null) {
+          _uiState.update { state ->
+            state.copy(voiceState = state.voiceState.copy(isTvStreamingVoice = true))
+          }
+          tvVoiceAudioStreamer.startStreaming(sessionId)
+        } else {
+          tvVoiceAudioStreamer.stopStreaming()
+          _uiState.update { state ->
+            state.copy(voiceState = state.voiceState.copy(isTvStreamingVoice = false))
+          }
+        }
       }
     }
   }
@@ -207,7 +263,12 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
       remoteClient.sessionEvent.collect { event ->
         when (event) {
           is RemoteControlClient.SessionEvent.Disconnected -> {
+            connectionStabilityJob?.cancel()
+            connectionStabilityJob = null
+            activeHeldKey = null
             unexpectedDisconnectRetryCount = 0
+            rapidDropCount = 0
+            lastConnectedAtMs = 0L
             _uiState.update { state ->
               if (state.connectionStatus is ConnectionStatus.Pairing) {
                 state
@@ -218,6 +279,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
           }
 
           is RemoteControlClient.SessionEvent.Connecting -> {
+            connectionStabilityJob?.cancel()
+            connectionStabilityJob = null
             val target = pendingTarget
             _uiState.update {
               it.copy(
@@ -233,7 +296,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
           is RemoteControlClient.SessionEvent.Connected -> {
             postPairingReconnectRetryAvailable = false
-            unexpectedDisconnectRetryCount = 0
+            autoReconnectPaused = false
+            lastConnectedAtMs = System.currentTimeMillis()
+            scheduleConnectionStabilityReset()
             val target = pendingTarget ?: lastActiveTarget
             if (target != null) {
               lastActiveTarget = target
@@ -264,13 +329,21 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
           }
 
           is RemoteControlClient.SessionEvent.PairingRequired -> {
+            connectionStabilityJob?.cancel()
+            connectionStabilityJob = null
+            activeHeldKey = null
             unexpectedDisconnectRetryCount = 0
+            rapidDropCount = 0
+            lastConnectedAtMs = 0L
+            autoReconnectPaused = false
             val target = pendingTarget
             if (target != null) {
               if (postPairingReconnectRetryAvailable) {
                 postPairingReconnectRetryAvailable = false
                 delay(500L)
-                remoteClient.connect(target.ipAddress, target.controlPort)
+                reconnectMutex.withLock {
+                  remoteClient.connect(target.ipAddress, target.controlPort)
+                }
               } else {
                 initiatePairing(target)
               }
@@ -278,11 +351,17 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
           }
 
           is RemoteControlClient.SessionEvent.ConnectionLost -> {
+            connectionStabilityJob?.cancel()
+            connectionStabilityJob = null
+            activeHeldKey = null
             postPairingReconnectRetryAvailable = false
             handleUnexpectedSessionInterruption(event.message)
           }
 
           is RemoteControlClient.SessionEvent.Error -> {
+            connectionStabilityJob?.cancel()
+            connectionStabilityJob = null
+            activeHeldKey = null
             postPairingReconnectRetryAvailable = false
             handleUnexpectedSessionInterruption(event.message)
           }
@@ -291,11 +370,32 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     }
   }
 
+  private fun scheduleConnectionStabilityReset() {
+    connectionStabilityJob?.cancel()
+    connectionStabilityJob =
+      viewModelScope.launch {
+        delay(STABLE_CONNECTION_WINDOW_MS)
+        if (remoteClient.isConnectionHealthy()) {
+          unexpectedDisconnectRetryCount = 0
+          rapidDropCount = 0
+          autoReconnectPaused = false
+        }
+      }
+  }
+
   private fun handleUnexpectedSessionInterruption(errorMessage: String) {
     val state = _uiState.value
     if (state.connectionStatus is ConnectionStatus.Pairing) {
       return
     }
+    val connectedDurationMs =
+      if (lastConnectedAtMs > 0L) (System.currentTimeMillis() - lastConnectedAtMs).coerceAtLeast(0L)
+      else -1L
+    if (connectedDurationMs in 0L until STABLE_CONNECTION_WINDOW_MS) {
+      rapidDropCount++
+    }
+    lastConnectedAtMs = 0L
+
     val target = pendingTarget ?: lastActiveTarget
     if (userManuallyDisconnected || target == null || !state.settings.autoReconnectEnabled) {
       _uiState.update {
@@ -322,24 +422,43 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
       }
       return
     }
-    if (unexpectedDisconnectRetryCount < MAX_AUTO_RECONNECT_ATTEMPTS) {
-      val backoffIndex = unexpectedDisconnectRetryCount.coerceAtMost(AUTO_RECONNECT_BACKOFF_MS.lastIndex)
-      val backoffMs = AUTO_RECONNECT_BACKOFF_MS[backoffIndex]
-      unexpectedDisconnectRetryCount++
-      scheduleSilentReconnect(target, delayMs = backoffMs)
-    } else {
+    val hitRapidDropCap = rapidDropCount >= MAX_RAPID_DROP_CYCLES
+    val hitAttemptCap = unexpectedDisconnectRetryCount >= MAX_AUTO_RECONNECT_ATTEMPTS
+    if (autoReconnectPaused || hitRapidDropCap || hitAttemptCap) {
+      autoReconnectPaused = true
+      autoReconnectJob?.cancel()
+      autoReconnectJob = null
+      val displayMsg =
+        if (hitRapidDropCap) {
+          "Connection kept dropping right after connecting (${rapidDropCount}x). Auto-retry paused."
+        } else {
+          errorMessage
+        }
+      val detail =
+        if (hitRapidDropCap) {
+          "Last cause: $errorMessage. Tap Re-pair TV to refresh the pairing certificate or Retry to reconnect."
+        } else {
+          errorMessage
+        }
       _uiState.update {
         it.copy(
           connectionStatus =
             ConnectionStatus.Error(
-              message = errorMessage,
+              message = displayMsg,
               targetIp = target.ipAddress,
               targetPort = target.controlPort,
               targetName = target.customName,
+              isRapidDropLoop = hitRapidDropCap,
+              diagnosticDetail = detail,
             )
         )
       }
+      return
     }
+    val backoffIndex = unexpectedDisconnectRetryCount.coerceAtMost(AUTO_RECONNECT_BACKOFF_MS.lastIndex)
+    val backoffMs = AUTO_RECONNECT_BACKOFF_MS[backoffIndex]
+    unexpectedDisconnectRetryCount++
+    scheduleSilentReconnect(target, delayMs = backoffMs)
   }
 
   private fun registerNetworkCallback() {
@@ -354,16 +473,20 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
       val callback =
         object : ConnectivityManager.NetworkCallback() {
           override fun onAvailable(network: Network) {
+            if (!hasSeenInitialNetworkCallback) {
+              hasSeenInitialNetworkCallback = true
+              return
+            }
             viewModelScope.launch {
-              if (!isAppInForeground || userManuallyDisconnected) return@launch
+              if (!isAppInForeground || userManuallyDisconnected || autoReconnectPaused) return@launch
               val state = _uiState.value
               if (!state.settings.autoReconnectEnabled) return@launch
               if (state.connectionStatus is ConnectionStatus.Pairing) return@launch
               if (state.connectionStatus is ConnectionStatus.Connecting) return@launch
+              if (autoReconnectJob?.isActive == true) return@launch
               val target = lastActiveTarget ?: pendingTarget ?: resolveLastSavedTarget(state) ?: return@launch
               if (!remoteClient.isConnectionHealthy()) {
-                unexpectedDisconnectRetryCount = 0
-                scheduleSilentReconnect(target, delayMs = 250L, forceRestart = true)
+                scheduleSilentReconnect(target, delayMs = 250L, forceRestart = false)
               }
             }
           }
@@ -387,6 +510,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
   fun onAppBackgrounded() {
     isAppInForeground = false
+    releaseHeldKeyIfNeeded()
+    tvVoiceAudioStreamer.stopStreaming()
     autoReconnectJob?.cancel()
     autoReconnectJob = null
   }
@@ -394,7 +519,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   fun onAppForegrounded() {
     isAppInForeground = true
     val state = _uiState.value
-    if (userManuallyDisconnected) return
+    if (userManuallyDisconnected || autoReconnectPaused) return
     if (!state.settings.autoReconnectEnabled) return
     if (state.connectionStatus is ConnectionStatus.Pairing) return
     if (state.connectionStatus is ConnectionStatus.Connecting) return
@@ -402,6 +527,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     val target = lastActiveTarget ?: resolveLastSavedTarget(state) ?: return
     if (!remoteClient.isConnectionHealthy() || state.connectionStatus !is ConnectionStatus.Connected) {
       unexpectedDisconnectRetryCount = 0
+      rapidDropCount = 0
       scheduleSilentReconnect(target, delayMs = 0L, forceRestart = true)
     }
   }
@@ -423,6 +549,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     delayMs: Long,
     forceRestart: Boolean = false,
   ) {
+    if (autoReconnectPaused) return
     if (autoReconnectJob?.isActive == true) {
       if (!forceRestart) return
       autoReconnectJob?.cancel()
@@ -432,12 +559,12 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         if (delayMs > 0L) {
           delay(delayMs)
         }
-        if (!isAppInForeground || userManuallyDisconnected) return@launch
+        if (!isAppInForeground || userManuallyDisconnected || autoReconnectPaused) return@launch
         if (!_uiState.value.settings.autoReconnectEnabled) return@launch
         if (_uiState.value.connectionStatus is ConnectionStatus.Pairing) return@launch
 
         reconnectMutex.withLock {
-          if (remoteClient.isConnectionHealthy()) return@withLock
+          if (autoReconnectPaused || remoteClient.isConnectionHealthy()) return@withLock
           pendingTarget = target
           lastActiveTarget = target
           navigateToRemoteOnConnect = !_uiState.value.showConnectionHub
@@ -506,6 +633,10 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   }
 
   fun forcePairWithTarget(ipAddress: String, controlPort: Int, deviceName: String, customName: String) {
+    autoReconnectJob?.cancel()
+    autoReconnectJob = null
+    connectionStabilityJob?.cancel()
+    connectionStabilityJob = null
     val target =
       PendingConnectionTarget(
         ipAddress = ipAddress.trim(),
@@ -515,19 +646,64 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         profileId = _uiState.value.activeProfileId,
       )
     userManuallyDisconnected = false
+    autoReconnectPaused = false
+    rapidDropCount = 0
+    unexpectedDisconnectRetryCount = 0
+    lastConnectedAtMs = 0L
     navigateToRemoteOnConnect = true
     pendingTarget = target
     lastActiveTarget = target
+    remoteClient.disconnect()
     initiatePairing(target)
   }
 
-  private fun connectWithAutoPair(target: PendingConnectionTarget) {
+  fun retryCurrentTarget() {
+    val err = _uiState.value.connectionStatus as? ConnectionStatus.Error
+    val target =
+      if (err?.targetIp != null) {
+        PendingConnectionTarget(
+          ipAddress = err.targetIp,
+          controlPort = err.targetPort,
+          deviceName = err.targetName ?: err.targetIp,
+          customName = err.targetName ?: err.targetIp,
+          profileId = _uiState.value.activeProfileId,
+        )
+      } else {
+        lastActiveTarget ?: pendingTarget ?: resolveLastSavedTarget(_uiState.value)
+      } ?: return
+    connectWithAutoPair(target, keepCurrentScreen = !_uiState.value.showConnectionHub)
+  }
+
+  fun repairCurrentTarget() {
+    val err = _uiState.value.connectionStatus as? ConnectionStatus.Error
+    val base = lastActiveTarget ?: pendingTarget ?: resolveLastSavedTarget(_uiState.value)
+    val ip = err?.targetIp ?: base?.ipAddress ?: return
+    val port = err?.targetPort ?: base?.controlPort ?: RemoteControlClient.DEFAULT_REMOTE_PORT
+    val deviceName = err?.targetName ?: base?.deviceName ?: ip
+    val customName = base?.customName ?: deviceName
+    forcePairWithTarget(
+      ipAddress = ip,
+      controlPort = port,
+      deviceName = deviceName,
+      customName = customName,
+    )
+  }
+
+  private fun connectWithAutoPair(
+    target: PendingConnectionTarget,
+    keepCurrentScreen: Boolean = false,
+  ) {
     autoReconnectJob?.cancel()
     autoReconnectJob = null
+    connectionStabilityJob?.cancel()
+    connectionStabilityJob = null
     cancelPairingInternal()
     userManuallyDisconnected = false
-    navigateToRemoteOnConnect = true
+    autoReconnectPaused = false
+    navigateToRemoteOnConnect = if (keepCurrentScreen) !_uiState.value.showConnectionHub else true
     unexpectedDisconnectRetryCount = 0
+    rapidDropCount = 0
+    lastConnectedAtMs = 0L
     postPairingReconnectRetryAvailable = false
     pendingTarget = target
     lastActiveTarget = target
@@ -645,9 +821,14 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
             )
           prefsStore.setLastConnectedTvId(saved.id)
           _uiState.update { it.copy(savedConnections = prefsStore.loadSavedConnections()) }
+          autoReconnectPaused = false
+          rapidDropCount = 0
+          unexpectedDisconnectRetryCount = 0
           postPairingReconnectRetryAvailable = true
-          delay(300L)
-          remoteClient.connect(target.ipAddress, target.controlPort)
+          delay(450L)
+          reconnectMutex.withLock {
+            remoteClient.connect(target.ipAddress, target.controlPort)
+          }
         }
 
         is PairingClient.PinSubmitResult.InvalidPinFormatOrCheck -> {
@@ -700,17 +881,25 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
   fun disconnect() {
     userManuallyDisconnected = true
+    autoReconnectPaused = false
+    rapidDropCount = 0
+    lastConnectedAtMs = 0L
+    unexpectedDisconnectRetryCount = 0
+    releaseHeldKeyIfNeeded()
+    tvVoiceAudioStreamer.stopStreaming()
+    connectionStabilityJob?.cancel()
+    connectionStabilityJob = null
     autoReconnectJob?.cancel()
     autoReconnectJob = null
     pendingTarget = null
     lastActiveTarget = null
-    unexpectedDisconnectRetryCount = 0
     cancelPairingInternal()
     remoteClient.disconnect()
     _uiState.update {
       it.copy(
         connectionStatus = ConnectionStatus.Disconnected,
         showConnectionHub = true,
+        voiceState = VoiceInputUiState(),
       )
     }
   }
@@ -771,44 +960,291 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     sendKey(keyCode, cue)
   }
 
+  // --- Voice Input & Commands ---
+
+  fun openVoiceSheet(show: Boolean) {
+    feedbackManager.trigger(FeedbackCue.NAV_TICK, _uiState.value.settings)
+    if (!show) {
+      tvVoiceAudioStreamer.stopStreaming()
+    }
+    _uiState.update { state ->
+      state.copy(
+        voiceState =
+          if (show) {
+            state.voiceState.copy(
+              showVoiceSheet = true,
+              errorMessage = null,
+            )
+          } else {
+            state.voiceState.copy(
+              showVoiceSheet = false,
+              isListening = false,
+              rmsLevel = 0f,
+              partialTranscript = "",
+            )
+          }
+      )
+    }
+  }
+
+  fun onVoiceListeningStarted() {
+    feedbackManager.trigger(FeedbackCue.CONFIRM_CHIME, _uiState.value.settings)
+    _uiState.update { state ->
+      state.copy(
+        voiceState =
+          state.voiceState.copy(
+            showVoiceSheet = true,
+            isListening = true,
+            rmsLevel = 0f,
+            partialTranscript = "",
+            errorMessage = null,
+          )
+      )
+    }
+  }
+
+  fun onVoiceListeningStopped() {
+    _uiState.update { state ->
+      state.copy(
+        voiceState =
+          state.voiceState.copy(
+            isListening = false,
+            rmsLevel = 0f,
+          )
+      )
+    }
+  }
+
+  fun onVoiceRmsChanged(normalizedLevel: Float) {
+    _uiState.update { state ->
+      if (!state.voiceState.isListening) state
+      else state.copy(voiceState = state.voiceState.copy(rmsLevel = normalizedLevel.coerceIn(0f, 1f)))
+    }
+  }
+
+  fun onVoicePartialResult(partialText: String) {
+    _uiState.update { state ->
+      state.copy(
+        voiceState =
+          state.voiceState.copy(
+            partialTranscript = partialText,
+            errorMessage = null,
+          )
+      )
+    }
+  }
+
+  fun onVoiceError(message: String) {
+    _uiState.update { state ->
+      state.copy(
+        voiceState =
+          state.voiceState.copy(
+            isListening = false,
+            rmsLevel = 0f,
+            errorMessage = message,
+          )
+      )
+    }
+  }
+
+  fun onVoiceFinalResult(transcript: String) {
+    val clean = transcript.trim()
+    if (clean.isEmpty()) return
+
+    val uiPrefs = _uiState.value.uiPreferences
+    val allShortcuts =
+      (uiPrefs.customShortcuts + TvAppShortcuts.all + TvAppShortcuts.popularAddableCatalog)
+        .distinctBy { it.id }
+
+    val parsed = VoiceCommandParser.parse(clean, allShortcuts) ?: return
+
+    val actionLabel =
+      when (parsed) {
+        is ParsedVoiceCommand.SendKey -> {
+          sendKey(parsed.keyCode, parsed.cue)
+          parsed.label
+        }
+        is ParsedVoiceCommand.OpenOttApp -> {
+          launchShortcut(parsed.shortcut)
+          parsed.label
+        }
+        is ParsedVoiceCommand.SearchOrType -> {
+          executeVoiceTvSearch(parsed.query)
+          parsed.label
+        }
+      }
+
+    _uiState.update { state ->
+      state.copy(
+        voiceState =
+          state.voiceState.copy(
+            isListening = false,
+            rmsLevel = 0f,
+            partialTranscript = "",
+            lastTranscript = clean,
+            executedActionLabel = actionLabel,
+            errorMessage = null,
+          ),
+        statusBannerMessage = actionLabel,
+      )
+    }
+  }
+
+  private fun executeVoiceTvSearch(query: String) {
+    feedbackManager.trigger(FeedbackCue.CONFIRM_CHIME, _uiState.value.settings)
+    viewModelScope.launch {
+      val sent =
+        sendWithAutoRecovery {
+          val wasImeFocused = _uiState.value.tvImeState.isImeRequested
+          if (!wasImeFocused) {
+            val openedSearch = remoteClient.sendKey(RemoteKeyCode.KEYCODE_SEARCH, RemoteDirection.SHORT)
+            if (!openedSearch) return@sendWithAutoRecovery false
+            delay(450L)
+          }
+          val imeState = _uiState.value.tvImeState
+          val textOk =
+            if (imeState.isImeRequested) {
+              remoteClient.sendImeText(newText = query, previousLength = imeState.currentText.length)
+            } else {
+              remoteClient.sendTextAsKeyEvents(query)
+            }
+          if (textOk) {
+            remoteClient.sendKey(RemoteKeyCode.KEYCODE_ENTER, RemoteDirection.SHORT)
+          } else {
+            false
+          }
+        }
+      if (!sent && _uiState.value.connectionStatus !is ConnectionStatus.Connected) {
+        _uiState.update {
+          it.copy(
+            statusBannerMessage =
+              if (autoReconnectPaused) "Auto-retry paused after repeated drops. Tap Re-pair TV or Retry."
+              else "Not connected to a TV. Connect or pair a device first."
+          )
+        }
+      }
+    }
+  }
+
+  fun triggerTvVoiceAssistant() {
+    sendKey(RemoteKeyCode.KEYCODE_VOICE_ASSIST, FeedbackCue.POWER_OR_APP)
+    _uiState.update { state ->
+      state.copy(
+        voiceState =
+          state.voiceState.copy(
+            executedActionLabel = "Triggered TV Voice Assistant",
+            errorMessage = null,
+          )
+      )
+    }
+  }
+
   fun setInputMode(mode: RemoteInputMode) {
     feedbackManager.trigger(FeedbackCue.NAV_TICK, _uiState.value.settings)
     _uiState.update { it.copy(inputMode = mode) }
   }
 
-  fun sendKey(keyCode: RemoteKeyCode, cue: FeedbackCue = FeedbackCue.NAV_TICK) {
+  fun sendKey(
+    keyCode: RemoteKeyCode,
+    cue: FeedbackCue = FeedbackCue.NAV_TICK,
+    direction: RemoteDirection = RemoteDirection.SHORT,
+  ) {
     feedbackManager.trigger(cue, _uiState.value.settings)
     viewModelScope.launch {
-      val sent = sendWithAutoRecovery { remoteClient.sendKey(keyCode, RemoteDirection.SHORT) }
+      val sent = sendWithAutoRecovery { remoteClient.sendKey(keyCode, direction) }
       if (!sent && _uiState.value.connectionStatus !is ConnectionStatus.Connected) {
         _uiState.update {
-          it.copy(statusBannerMessage = "Not connected to a TV. Connect or pair a device first.")
+          it.copy(
+            statusBannerMessage =
+              if (autoReconnectPaused) "Auto-retry paused after repeated drops. Tap Re-pair TV or Retry."
+              else "Not connected to a TV. Connect or pair a device first."
+          )
         }
+      }
+    }
+  }
+
+  fun onKeyHoldStart(keyCode: RemoteKeyCode, cue: FeedbackCue = FeedbackCue.NAV_TICK) {
+    feedbackManager.trigger(cue, _uiState.value.settings)
+    activeHeldKey = keyCode
+    viewModelScope.launch {
+      val sent = sendWithAutoRecovery { remoteClient.sendKey(keyCode, RemoteDirection.START_LONG) }
+      if (!sent) {
+        if (activeHeldKey == keyCode) activeHeldKey = null
+        if (_uiState.value.connectionStatus !is ConnectionStatus.Connected) {
+          _uiState.update {
+            it.copy(
+              statusBannerMessage =
+                if (autoReconnectPaused) "Auto-retry paused after repeated drops. Tap Re-pair TV or Retry."
+                else "Not connected to a TV. Connect or pair a device first."
+            )
+          }
+        }
+      }
+    }
+  }
+
+  fun onKeyHoldEnd(keyCode: RemoteKeyCode) {
+    if (activeHeldKey == keyCode) {
+      activeHeldKey = null
+    }
+    viewModelScope.launch {
+      if (remoteClient.isConnectionHealthy()) {
+        remoteClient.sendKey(keyCode, RemoteDirection.END_LONG)
+      }
+    }
+  }
+
+  private fun releaseHeldKeyIfNeeded() {
+    val held = activeHeldKey ?: return
+    activeHeldKey = null
+    viewModelScope.launch {
+      if (remoteClient.isConnectionHealthy()) {
+        remoteClient.sendKey(held, RemoteDirection.END_LONG)
       }
     }
   }
 
   fun launchShortcut(shortcut: TvAppShortcut) {
     feedbackManager.trigger(FeedbackCue.POWER_OR_APP, _uiState.value.settings)
+    if (autoReconnectPaused) {
+      _uiState.update {
+        it.copy(
+          statusBannerMessage = "Connection paused after repeated drops. Tap Re-pair TV or Retry."
+        )
+      }
+      return
+    }
     ottLaunchJob?.cancel()
     ottLaunchJob =
       viewModelScope.launch {
         if (!ensureConnectedForCommand()) {
           _uiState.update {
-            it.copy(statusBannerMessage = "Connect to your TV to launch ${shortcut.name}.")
+            it.copy(
+              statusBannerMessage =
+                if (autoReconnectPaused) "Connection paused after repeated drops. Tap Re-pair TV or Retry."
+                else "Connect to your TV to launch ${shortcut.name}."
+            )
           }
           return@launch
         }
         val plan = TvAppShortcuts.buildLaunchPlan(shortcut)
         var outcome = remoteClient.launchAppWithPlan(plan)
-        if (outcome == OttLaunchOutcome.FAILED && ensureConnectedForCommand(forceReconnect = true)) {
+        if (
+          outcome == OttLaunchOutcome.FAILED &&
+          !autoReconnectPaused &&
+          _uiState.value.connectionStatus !is ConnectionStatus.Error &&
+          ensureConnectedForCommand(forceReconnect = true)
+        ) {
           outcome = remoteClient.launchAppWithPlan(plan)
         }
         val banner =
           when (outcome) {
             OttLaunchOutcome.LAUNCHED_NATIVE_APP -> "Opening ${shortcut.name} app on TV..."
             OttLaunchOutcome.OPENED_IN_BROWSER -> "${shortcut.name} app not on TV — opening in TV browser..."
-            OttLaunchOutcome.FAILED -> "Connect to your TV to launch ${shortcut.name}."
+            OttLaunchOutcome.FAILED ->
+              if (autoReconnectPaused) "Connection paused after repeated drops. Tap Re-pair TV or Retry."
+              else "Connect to your TV to launch ${shortcut.name}."
           }
         _uiState.update { it.copy(statusBannerMessage = banner) }
       }
@@ -816,6 +1252,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
   private suspend fun ensureConnectedForCommand(forceReconnect: Boolean = false): Boolean {
     if (!forceReconnect && remoteClient.isConnectionHealthy()) return true
+    if (autoReconnectPaused) return false
     val target = lastActiveTarget ?: pendingTarget ?: return false
     if (userManuallyDisconnected || !_uiState.value.settings.autoReconnectEnabled) return false
     if (_uiState.value.connectionStatus is ConnectionStatus.Pairing) return false
@@ -823,7 +1260,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     autoReconnectJob?.cancel()
     autoReconnectJob = null
     return reconnectMutex.withLock {
-      if (!forceReconnect && remoteClient.isConnectionHealthy()) {
+      if (autoReconnectPaused) {
+        false
+      } else if (!forceReconnect && remoteClient.isConnectionHealthy()) {
         true
       } else {
         pendingTarget = target
@@ -845,6 +1284,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
   private suspend fun sendWithAutoRecovery(action: suspend () -> Boolean): Boolean {
     if (action()) return true
+    if (autoReconnectPaused) return false
     return if (ensureConnectedForCommand(forceReconnect = true)) action() else false
   }
 
@@ -1352,7 +1792,10 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
   override fun onCleared() {
     super.onCleared()
+    releaseHeldKeyIfNeeded()
+    tvVoiceAudioStreamer.stopStreaming()
     ottLaunchJob?.cancel()
+    connectionStabilityJob?.cancel()
     autoReconnectJob?.cancel()
     try {
       val cb = networkCallback
@@ -1372,6 +1815,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   }
 
   companion object {
+    private const val STABLE_CONNECTION_WINDOW_MS = 8_000L
+    private const val MAX_RAPID_DROP_CYCLES = 3
     private const val MAX_AUTO_RECONNECT_ATTEMPTS = 6
     private val AUTO_RECONNECT_BACKOFF_MS = longArrayOf(500L, 1_000L, 2_000L, 4_000L, 8_000L, 10_000L)
     private const val RECONNECT_BEFORE_RETRY_TIMEOUT_MS = 3_000L

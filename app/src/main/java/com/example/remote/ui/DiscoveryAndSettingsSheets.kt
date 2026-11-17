@@ -126,6 +126,7 @@ fun ConnectionHubView(
   onSaveDiscoveredTv: (DiscoveredTv) -> Unit,
   onDownloadUpdate: () -> Unit,
   onOpenUpdateDetails: () -> Unit,
+  onRepairConnection: (ConnectionStatus.Error) -> Unit = {},
   modifier: Modifier = Modifier,
 ) {
   val activeProfileTvs =
@@ -243,6 +244,7 @@ fun ConnectionHubView(
               )
             }
           },
+          onRepairConnection = onRepairConnection,
         )
       }
 
@@ -815,6 +817,7 @@ private fun ConnectionStatusHeroCard(
   status: ConnectionStatus,
   onOpenRemote: () -> Unit,
   onRetryConnection: (ConnectionStatus.Error) -> Unit,
+  onRepairConnection: (ConnectionStatus.Error) -> Unit,
 ) {
   val gradient =
     Brush.linearGradient(
@@ -916,27 +919,45 @@ private fun ConnectionStatusHeroCard(
         is ConnectionStatus.Error -> {
           Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(
-              text = "Connection Issue",
+              text =
+                if (status.isRapidDropLoop) "Auto-Retry Paused (Repeated Drops)"
+                else "Connection Issue",
               style = MaterialTheme.typography.titleMedium,
               color = MaterialTheme.colorScheme.error,
             )
             Text(
-              text = status.message,
+              text = status.diagnosticDetail ?: status.message,
               style = MaterialTheme.typography.bodyMedium,
               color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             if (status.targetIp != null) {
-              OutlinedButton(
-                onClick = { onRetryConnection(status) },
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
-                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-                modifier = Modifier.testTag("retry_connection_button"),
+              Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
               ) {
-                Text(
-                  text = "Retry ${status.targetName ?: status.targetIp}",
-                  maxLines = 1,
-                  overflow = TextOverflow.Ellipsis,
-                )
+                Button(
+                  onClick = { onRepairConnection(status) },
+                  contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                  modifier = Modifier.weight(1f).height(48.dp).testTag("hub_repair_connection_button"),
+                ) {
+                  Text(
+                    text = "Re-pair TV",
+                    maxLines = 1,
+                    softWrap = false,
+                  )
+                }
+                OutlinedButton(
+                  onClick = { onRetryConnection(status) },
+                  border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
+                  contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                  modifier = Modifier.weight(1f).height(48.dp).testTag("retry_connection_button"),
+                ) {
+                  Text(
+                    text = "Retry",
+                    maxLines = 1,
+                    softWrap = false,
+                  )
+                }
               }
             }
           }

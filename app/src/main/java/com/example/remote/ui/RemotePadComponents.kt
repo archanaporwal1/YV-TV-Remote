@@ -8,9 +8,14 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -47,9 +52,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -64,9 +71,12 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -75,15 +85,110 @@ import com.example.proto.remote.RemoteKeyCode
 import com.example.remote.data.TvAppShortcut
 import com.example.remote.data.TvAppShortcuts
 import com.example.remote.feedback.FeedbackCue
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
+
+private const val HOLD_ACTIVATION_THRESHOLD_MS = 260L
+
+@Composable
+fun Modifier.holdableRemoteGesture(
+  interactionSource: MutableInteractionSource,
+  contentDescription: String,
+  onClick: () -> Unit,
+  onHoldStart: (() -> Unit)? = null,
+  onHoldEnd: (() -> Unit)? = null,
+): Modifier {
+  if (onHoldStart == null || onHoldEnd == null) {
+    return this.clickable(
+      interactionSource = interactionSource,
+      indication = androidx.compose.material3.ripple(color = MaterialTheme.colorScheme.primary),
+      onClickLabel = contentDescription,
+      onClick = onClick,
+    )
+  }
+
+  val currentOnClick by rememberUpdatedState(onClick)
+  val currentOnHoldStart by rememberUpdatedState(onHoldStart)
+  val currentOnHoldEnd by rememberUpdatedState(onHoldEnd)
+  var activeHold by remember { mutableStateOf(false) }
+
+  DisposableEffect(Unit) {
+    onDispose {
+      if (activeHold) {
+        activeHold = false
+        currentOnHoldEnd()
+      }
+    }
+  }
+
+  return this
+    .indication(
+      interactionSource = interactionSource,
+      indication = androidx.compose.material3.ripple(color = MaterialTheme.colorScheme.primary),
+    )
+    .semantics {
+      onClick(label = contentDescription) {
+        currentOnClick()
+        true
+      }
+    }
+    .pointerInput(interactionSource) {
+      awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        val press = PressInteraction.Press(down.position)
+        interactionSource.tryEmit(press)
+
+        var upBeforeThreshold: PointerInputChange? = null
+        var cancelledBeforeThreshold = false
+        val timedOut =
+          withTimeoutOrNull(HOLD_ACTIVATION_THRESHOLD_MS) {
+            val result = waitForUpOrCancellation()
+            if (result == null) {
+              cancelledBeforeThreshold = true
+            } else {
+              upBeforeThreshold = result
+            }
+            false
+          } ?: true
+
+        if (!timedOut) {
+          if (upBeforeThreshold != null) {
+            upBeforeThreshold?.consume()
+            interactionSource.tryEmit(PressInteraction.Release(press))
+            currentOnClick()
+          } else if (cancelledBeforeThreshold) {
+            interactionSource.tryEmit(PressInteraction.Cancel(press))
+          }
+          return@awaitEachGesture
+        }
+
+        // Held past threshold: emit START_LONG and keep key pressed until release/cancel
+        activeHold = true
+        currentOnHoldStart()
+        val releaseEvent = waitForUpOrCancellation()
+        if (releaseEvent != null) {
+          releaseEvent.consume()
+          interactionSource.tryEmit(PressInteraction.Release(press))
+        } else {
+          interactionSource.tryEmit(PressInteraction.Cancel(press))
+        }
+        if (activeHold) {
+          activeHold = false
+          currentOnHoldEnd()
+        }
+      }
+    }
+}
 
 @Composable
 fun TactileKeyButton(
   onClick: () -> Unit,
   contentDescription: String,
   modifier: Modifier = Modifier,
+  onHoldStart: (() -> Unit)? = null,
+  onHoldEnd: (() -> Unit)? = null,
   shape: Shape = RoundedCornerShape(16.dp),
   containerColor: Color = MaterialTheme.colorScheme.surfaceVariant,
   borderColor: Color = MaterialTheme.colorScheme.outlineVariant,
@@ -127,11 +232,12 @@ fun TactileKeyButton(
       modifier
         .scale(scale)
         .clip(shape)
-        .clickable(
+        .holdableRemoteGesture(
           interactionSource = interactionSource,
-          indication = androidx.compose.material3.ripple(color = MaterialTheme.colorScheme.primary),
-          onClickLabel = contentDescription,
+          contentDescription = contentDescription,
           onClick = onClick,
+          onHoldStart = onHoldStart,
+          onHoldEnd = onHoldEnd,
         ),
   ) {
     Box(
@@ -146,6 +252,8 @@ fun TactileKeyButton(
 @Composable
 fun ClassicDPadPod(
   onKey: (RemoteKeyCode, FeedbackCue) -> Unit,
+  onKeyHoldStart: (RemoteKeyCode, FeedbackCue) -> Unit = { _, _ -> },
+  onKeyHoldEnd: (RemoteKeyCode) -> Unit = {},
   modifier: Modifier = Modifier,
   compact: Boolean = false,
 ) {
@@ -220,6 +328,8 @@ fun ClassicDPadPod(
     // Up
     TactileKeyButton(
       onClick = { onKey(RemoteKeyCode.KEYCODE_DPAD_UP, FeedbackCue.NAV_TICK) },
+      onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_DPAD_UP, FeedbackCue.NAV_TICK) },
+      onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_DPAD_UP) },
       contentDescription = "D-Pad Up",
       shape = RoundedCornerShape(24.dp),
       containerColor = Color.Transparent,
@@ -237,6 +347,8 @@ fun ClassicDPadPod(
     // Down
     TactileKeyButton(
       onClick = { onKey(RemoteKeyCode.KEYCODE_DPAD_DOWN, FeedbackCue.NAV_TICK) },
+      onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_DPAD_DOWN, FeedbackCue.NAV_TICK) },
+      onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_DPAD_DOWN) },
       contentDescription = "D-Pad Down",
       shape = RoundedCornerShape(24.dp),
       containerColor = Color.Transparent,
@@ -254,6 +366,8 @@ fun ClassicDPadPod(
     // Left
     TactileKeyButton(
       onClick = { onKey(RemoteKeyCode.KEYCODE_DPAD_LEFT, FeedbackCue.NAV_TICK) },
+      onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_DPAD_LEFT, FeedbackCue.NAV_TICK) },
+      onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_DPAD_LEFT) },
       contentDescription = "D-Pad Left",
       shape = RoundedCornerShape(24.dp),
       containerColor = Color.Transparent,
@@ -271,6 +385,8 @@ fun ClassicDPadPod(
     // Right
     TactileKeyButton(
       onClick = { onKey(RemoteKeyCode.KEYCODE_DPAD_RIGHT, FeedbackCue.NAV_TICK) },
+      onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_DPAD_RIGHT, FeedbackCue.NAV_TICK) },
+      onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_DPAD_RIGHT) },
       contentDescription = "D-Pad Right",
       shape = RoundedCornerShape(24.dp),
       containerColor = Color.Transparent,
@@ -288,6 +404,8 @@ fun ClassicDPadPod(
     // Center OK Button
     TactileKeyButton(
       onClick = { onKey(RemoteKeyCode.KEYCODE_DPAD_CENTER, FeedbackCue.CONFIRM_CHIME) },
+      onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_DPAD_CENTER, FeedbackCue.CONFIRM_CHIME) },
+      onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_DPAD_CENTER) },
       contentDescription = "Select OK",
       shape = CircleShape,
       containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -403,6 +521,8 @@ fun TouchpadSurfacePod(
 @Composable
 fun PrimaryNavigationRow(
   onKey: (RemoteKeyCode, FeedbackCue) -> Unit,
+  onKeyHoldStart: (RemoteKeyCode, FeedbackCue) -> Unit = { _, _ -> },
+  onKeyHoldEnd: (RemoteKeyCode) -> Unit = {},
   modifier: Modifier = Modifier,
   compact: Boolean = false,
 ) {
@@ -416,6 +536,8 @@ fun PrimaryNavigationRow(
       label = "Back",
       testTag = "btn_back",
       onClick = { onKey(RemoteKeyCode.KEYCODE_BACK, FeedbackCue.BACK_HOME) },
+      onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_BACK, FeedbackCue.BACK_HOME) },
+      onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_BACK) },
       modifier = Modifier.weight(1f).height(btnHeight),
     )
     NavActionButton(
@@ -423,6 +545,8 @@ fun PrimaryNavigationRow(
       label = "Home",
       testTag = "btn_home",
       onClick = { onKey(RemoteKeyCode.KEYCODE_HOME, FeedbackCue.BACK_HOME) },
+      onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_HOME, FeedbackCue.BACK_HOME) },
+      onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_HOME) },
       modifier = Modifier.weight(1f).height(btnHeight),
     )
     NavActionButton(
@@ -430,10 +554,14 @@ fun PrimaryNavigationRow(
       label = "Menu",
       testTag = "btn_menu",
       onClick = { onKey(RemoteKeyCode.KEYCODE_MENU, FeedbackCue.NAV_TICK) },
+      onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_MENU, FeedbackCue.NAV_TICK) },
+      onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_MENU) },
       modifier = Modifier.weight(1f).height(btnHeight),
     )
     TactileKeyButton(
       onClick = { onKey(RemoteKeyCode.KEYCODE_TV_INPUT, FeedbackCue.NAV_TICK) },
+      onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_TV_INPUT, FeedbackCue.NAV_TICK) },
+      onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_TV_INPUT) },
       contentDescription = "Input",
       shape = RoundedCornerShape(16.dp),
       modifier = Modifier.weight(1f).height(btnHeight).testTag("btn_input"),
@@ -465,10 +593,14 @@ private fun NavActionButton(
   label: String,
   testTag: String,
   onClick: () -> Unit,
+  onHoldStart: (() -> Unit)? = null,
+  onHoldEnd: (() -> Unit)? = null,
   modifier: Modifier = Modifier,
 ) {
   TactileKeyButton(
     onClick = onClick,
+    onHoldStart = onHoldStart,
+    onHoldEnd = onHoldEnd,
     contentDescription = label,
     shape = RoundedCornerShape(16.dp),
     modifier = modifier.testTag(testTag),
@@ -498,10 +630,17 @@ private fun NavActionButton(
 @Composable
 fun VolumeAndChannelPod(
   onKey: (RemoteKeyCode, FeedbackCue) -> Unit,
+  onKeyHoldStart: (RemoteKeyCode, FeedbackCue) -> Unit = { _, _ -> },
+  onKeyHoldEnd: (RemoteKeyCode) -> Unit = {},
   modifier: Modifier = Modifier,
   compact: Boolean = false,
 ) {
   val rowHeight = if (compact) 52.dp else 58.dp
+  val volDownInteraction = remember { MutableInteractionSource() }
+  val volUpInteraction = remember { MutableInteractionSource() }
+  val chDownInteraction = remember { MutableInteractionSource() }
+  val chUpInteraction = remember { MutableInteractionSource() }
+
   Row(
     modifier = modifier.fillMaxWidth(),
     horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -523,7 +662,14 @@ fun VolumeAndChannelPod(
             Modifier
               .weight(1f)
               .fillMaxSize()
-              .clickable { onKey(RemoteKeyCode.KEYCODE_VOLUME_DOWN, FeedbackCue.VOLUME_STEP) }
+              .clip(RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp))
+              .holdableRemoteGesture(
+                interactionSource = volDownInteraction,
+                contentDescription = "Volume Down",
+                onClick = { onKey(RemoteKeyCode.KEYCODE_VOLUME_DOWN, FeedbackCue.VOLUME_STEP) },
+                onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_VOLUME_DOWN, FeedbackCue.VOLUME_STEP) },
+                onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_VOLUME_DOWN) },
+              )
               .testTag("btn_vol_down"),
           contentAlignment = Alignment.Center,
         ) {
@@ -553,7 +699,14 @@ fun VolumeAndChannelPod(
             Modifier
               .weight(1f)
               .fillMaxSize()
-              .clickable { onKey(RemoteKeyCode.KEYCODE_VOLUME_UP, FeedbackCue.VOLUME_STEP) }
+              .clip(RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp))
+              .holdableRemoteGesture(
+                interactionSource = volUpInteraction,
+                contentDescription = "Volume Up",
+                onClick = { onKey(RemoteKeyCode.KEYCODE_VOLUME_UP, FeedbackCue.VOLUME_STEP) },
+                onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_VOLUME_UP, FeedbackCue.VOLUME_STEP) },
+                onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_VOLUME_UP) },
+              )
               .testTag("btn_vol_up"),
           contentAlignment = Alignment.Center,
         ) {
@@ -596,7 +749,14 @@ fun VolumeAndChannelPod(
             Modifier
               .weight(1f)
               .fillMaxSize()
-              .clickable { onKey(RemoteKeyCode.KEYCODE_CHANNEL_DOWN, FeedbackCue.NAV_TICK) }
+              .clip(RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp))
+              .holdableRemoteGesture(
+                interactionSource = chDownInteraction,
+                contentDescription = "Channel Down",
+                onClick = { onKey(RemoteKeyCode.KEYCODE_CHANNEL_DOWN, FeedbackCue.NAV_TICK) },
+                onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_CHANNEL_DOWN, FeedbackCue.NAV_TICK) },
+                onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_CHANNEL_DOWN) },
+              )
               .testTag("btn_ch_down"),
           contentAlignment = Alignment.Center,
         ) {
@@ -618,7 +778,14 @@ fun VolumeAndChannelPod(
             Modifier
               .weight(1f)
               .fillMaxSize()
-              .clickable { onKey(RemoteKeyCode.KEYCODE_CHANNEL_UP, FeedbackCue.NAV_TICK) }
+              .clip(RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp))
+              .holdableRemoteGesture(
+                interactionSource = chUpInteraction,
+                contentDescription = "Channel Up",
+                onClick = { onKey(RemoteKeyCode.KEYCODE_CHANNEL_UP, FeedbackCue.NAV_TICK) },
+                onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_CHANNEL_UP, FeedbackCue.NAV_TICK) },
+                onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_CHANNEL_UP) },
+              )
               .testTag("btn_ch_up"),
           contentAlignment = Alignment.Center,
         ) {
@@ -636,6 +803,8 @@ fun VolumeAndChannelPod(
 @Composable
 fun MediaTransportBar(
   onKey: (RemoteKeyCode, FeedbackCue) -> Unit,
+  onKeyHoldStart: (RemoteKeyCode, FeedbackCue) -> Unit = { _, _ -> },
+  onKeyHoldEnd: (RemoteKeyCode) -> Unit = {},
   modifier: Modifier = Modifier,
   compact: Boolean = false,
 ) {
@@ -655,13 +824,11 @@ fun MediaTransportBar(
 
     buttons.forEachIndexed { index, (icon, label, keyCode) ->
       val isPlayPause = index == 2
+      val cue = if (isPlayPause) FeedbackCue.CONFIRM_CHIME else FeedbackCue.NAV_TICK
       TactileKeyButton(
-        onClick = {
-          onKey(
-            keyCode,
-            if (isPlayPause) FeedbackCue.CONFIRM_CHIME else FeedbackCue.NAV_TICK,
-          )
-        },
+        onClick = { onKey(keyCode, cue) },
+        onHoldStart = if (isPlayPause) null else ({ onKeyHoldStart(keyCode, cue) }),
+        onHoldEnd = if (isPlayPause) null else ({ onKeyHoldEnd(keyCode) }),
         contentDescription = label,
         shape = RoundedCornerShape(16.dp),
         containerColor =

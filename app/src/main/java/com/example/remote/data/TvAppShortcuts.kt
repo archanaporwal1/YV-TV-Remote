@@ -432,13 +432,16 @@ object TvAppShortcuts {
 
     // Native-first candidates (never hit TV browsers):
     // 1. Verified app-only custom URI schemes (highest compatibility with Android TV ACTION_VIEW)
-    // 2. Package-scoped Leanback/View Intent URIs (supported on TV firmwares using URI_INTENT_SCHEME)
-    // 3. Direct Google Play package launcher URI (market://launch?id=<primary_pkg>) so apps without
-    //    custom schemes (e.g., Prime Video, Hotstar, SonyLIV, ZEE5) still open natively when installed
-    // 4. Package-scoped standard LAUNCHER intents & explicit non-http user link
+    // 2. Direct Google Play package launcher URI (market://launch?id=<pkg>) so installed apps
+    //    (e.g., Netflix, Prime Video, Hotstar, SonyLIV, ZEE5) open natively without raw intent: parsing errors
+    // 3. Package-scoped Leanback/View/Launcher Intent URIs as secondary native fallbacks
+    // 4. Explicit non-http user link if provided
     val nativeCandidates =
       buildList {
         addAll(resolvedSchemes)
+        resolvedPackages.forEach { pkg ->
+          add("market://launch?id=$pkg")
+        }
         resolvedPackages.forEach { pkg ->
           add(
             "intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LEANBACK_LAUNCHER;package=$pkg;end"
@@ -450,9 +453,6 @@ object TvAppShortcuts {
               "intent://$hostAndPath#Intent;scheme=$scheme;action=android.intent.action.VIEW;package=$pkg;end"
             )
           }
-        }
-        resolvedPackages.firstOrNull()?.let { primaryPkg ->
-          add("market://launch?id=$primaryPkg")
         }
         resolvedPackages.forEach { pkg ->
           add(

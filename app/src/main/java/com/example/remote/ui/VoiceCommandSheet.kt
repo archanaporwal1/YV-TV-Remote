@@ -101,22 +101,6 @@ fun VoiceCommandSheet(
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
   var fallbackCommandText by remember { mutableStateOf("") }
 
-  val idleBreathing =
-    if (voiceState.isListening) {
-      val infiniteTransition = rememberInfiniteTransition(label = "voice_orb_pulse")
-      infiniteTransition.animateFloat(
-        initialValue = 1.0f,
-        targetValue = 1.14f,
-        animationSpec =
-          infiniteRepeatable(
-            animation = tween(900, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse,
-          ),
-        label = "orb_breathing",
-      ).value
-    } else {
-      1.0f
-    }
   val rmsScale by
     animateFloatAsState(
       targetValue =
@@ -125,8 +109,6 @@ fun VoiceCommandSheet(
       animationSpec = spring(),
       label = "rms_scale",
     )
-  val orbRingScale =
-    if (voiceState.isListening) maxOf(idleBreathing, rmsScale) else 1.0f
 
   ModalBottomSheet(
     onDismissRequest = onDismiss,
@@ -193,23 +175,21 @@ fun VoiceCommandSheet(
           modifier = Modifier.padding(vertical = 2.dp),
         ) {
           val primary = MaterialTheme.colorScheme.primary
-          Box(
-            modifier =
-              Modifier
-                .size(88.dp)
-                .scale(orbRingScale)
-                .clip(CircleShape)
-                .background(
-                  Brush.radialGradient(
-                    colors =
-                      if (voiceState.isListening) {
-                        listOf(primary.copy(alpha = 0.34f), primary.copy(alpha = 0.08f), Color.Transparent)
-                      } else {
-                        listOf(primary.copy(alpha = 0.16f), Color.Transparent)
-                      }
-                  )
-                ),
-          )
+          if (voiceState.isListening) {
+            ListeningOrbPulseHalo(primary = primary, rmsScale = rmsScale)
+          } else {
+            Box(
+              modifier =
+                Modifier
+                  .size(88.dp)
+                  .clip(CircleShape)
+                  .background(
+                    Brush.radialGradient(
+                      colors = listOf(primary.copy(alpha = 0.16f), Color.Transparent)
+                    )
+                  ),
+            )
+          }
           Surface(
             color =
               if (voiceState.isListening) MaterialTheme.colorScheme.primary
@@ -221,10 +201,12 @@ fun VoiceCommandSheet(
                 .size(64.dp)
                 .clip(CircleShape)
                 .clickable {
-                  when {
-                    !hasMicPermission -> onRequestMicPermission()
-                    voiceState.isListening -> onStopListening()
-                    else -> onStartListening()
+                  runCatching {
+                    when {
+                      !hasMicPermission -> onRequestMicPermission()
+                      voiceState.isListening -> onStopListening()
+                      else -> onStartListening()
+                    }
                   }
                 }
                 .testTag("voice_orb_button"),
@@ -341,7 +323,7 @@ fun VoiceCommandSheet(
                 modifier = Modifier.weight(1f),
               )
               Button(
-                onClick = onRequestMicPermission,
+                onClick = { runCatching { onRequestMicPermission() } },
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 modifier = Modifier.height(48.dp).testTag("voice_grant_permission_button"),
               ) {
@@ -353,7 +335,7 @@ fun VoiceCommandSheet(
       } else if (!isSpeechRecognizerAvailable) {
         item(key = "speech_unavailable_notice") {
           Text(
-            text = "On-device speech service is unavailable on this device. Use TV Assistant or type a voice command below.",
+            text = "On-device speech service is unavailable. Voice taps automatically open TV Assistant, or type a command below.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
@@ -369,10 +351,12 @@ fun VoiceCommandSheet(
         ) {
           Button(
             onClick = {
-              when {
-                !hasMicPermission -> onRequestMicPermission()
-                voiceState.isListening -> onStopListening()
-                else -> onStartListening()
+              runCatching {
+                when {
+                  !hasMicPermission -> onRequestMicPermission()
+                  voiceState.isListening -> onStopListening()
+                  else -> onStartListening()
+                }
               }
             },
             colors =
@@ -406,7 +390,7 @@ fun VoiceCommandSheet(
           }
 
           OutlinedButton(
-            onClick = onTriggerTvAssistant,
+            onClick = { runCatching { onTriggerTvAssistant() } },
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
             modifier = Modifier.weight(1f).height(48.dp).testTag("voice_tv_assistant_button"),
@@ -484,7 +468,7 @@ fun VoiceCommandSheet(
             onClick = {
               val cmd = fallbackCommandText.trim()
               if (cmd.isNotEmpty()) {
-                onRunVoiceCommandText(cmd)
+                runCatching { onRunVoiceCommandText(cmd) }
                 fallbackCommandText = ""
               }
             },
@@ -501,3 +485,36 @@ fun VoiceCommandSheet(
     }
   }
 }
+
+@Composable
+private fun ListeningOrbPulseHalo(
+  primary: Color,
+  rmsScale: Float,
+) {
+  val infiniteTransition = rememberInfiniteTransition(label = "voice_orb_pulse")
+  val idleBreathing by
+    infiniteTransition.animateFloat(
+      initialValue = 1.0f,
+      targetValue = 1.14f,
+      animationSpec =
+        infiniteRepeatable(
+          animation = tween(900, easing = FastOutSlowInEasing),
+          repeatMode = RepeatMode.Reverse,
+        ),
+      label = "orb_breathing",
+    )
+  val orbRingScale = maxOf(idleBreathing, rmsScale)
+  Box(
+    modifier =
+      Modifier
+        .size(88.dp)
+        .scale(orbRingScale)
+        .clip(CircleShape)
+        .background(
+          Brush.radialGradient(
+            colors = listOf(primary.copy(alpha = 0.34f), primary.copy(alpha = 0.08f), Color.Transparent)
+          )
+        ),
+  )
+}
+

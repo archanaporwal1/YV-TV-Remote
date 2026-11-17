@@ -203,6 +203,13 @@ class RemoteProtocolUnitTest {
       (explicitSearch as com.example.remote.voice.ParsedVoiceCommand.SearchOrType).query,
     )
 
+    val politeSearch = parser.parse("Please search for Inception")
+    org.junit.Assert.assertTrue(politeSearch is com.example.remote.voice.ParsedVoiceCommand.SearchOrType)
+    assertEquals(
+      "Inception",
+      (politeSearch as com.example.remote.voice.ParsedVoiceCommand.SearchOrType).query,
+    )
+
     val naturalSearch = parser.parse("Lo-fi focus beats")
     org.junit.Assert.assertTrue(naturalSearch is com.example.remote.voice.ParsedVoiceCommand.SearchOrType)
     assertEquals(
@@ -211,5 +218,13 @@ class RemoteProtocolUnitTest {
     )
 
     assertNull(parser.parse("   "))
+  }
+
+  @Test
+  fun delimitedStreamHelperRejectsMalformedOversizedLengthWithoutCrash() {
+    // Varint representing a huge length (> 16 MiB)
+    val badFrame = ByteArrayInputStream(byteArrayOf(0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0x07))
+    val result = runCatching { DelimitedStreamHelper.readDelimitedBytes(badFrame) }
+    org.junit.Assert.assertTrue(result.isFailure || result.getOrNull() == null)
   }
 }

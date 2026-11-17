@@ -2,6 +2,7 @@ package com.example.remote.ui
 
 import android.Manifest
 import android.app.Activity
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.speech.RecognizerIntent
@@ -64,6 +65,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -111,12 +113,9 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
   var hasWifiPermission by remember {
     mutableStateOf(
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        ContextCompat.checkSelfPermission(context, Manifest.permission.NEARBY_WIFI_DEVICES) ==
-          PackageManager.PERMISSION_GRANTED
+        checkPermissionSafe(context, Manifest.permission.NEARBY_WIFI_DEVICES)
       } else {
-        requiredPermissions.any {
-          ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
-        }
+        requiredPermissions.any { checkPermissionSafe(context, it) }
       }
     )
   }
@@ -142,21 +141,28 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
     ) { _ -> }
 
   var hasMicPermission by remember {
-    mutableStateOf(
-      ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-        PackageManager.PERMISSION_GRANTED
-    )
+    mutableStateOf(checkPermissionSafe(context, Manifest.permission.RECORD_AUDIO))
+  }
+  var autoAssistantFallbackUsedForAttempt by remember { mutableStateOf(false) }
+  var voiceLaunchRequestToken by remember { mutableIntStateOf(0) }
+
+  val routeVoiceFailureToTvAssistant: (String) -> Unit = { reason ->
+    if (!autoAssistantFallbackUsedForAttempt) {
+      autoAssistantFallbackUsedForAttempt = true
+      viewModel.fallbackToTvVoiceAssistant(reason)
+    }
   }
 
+  val appContext = remember(context) { context.applicationContext ?: context }
   val speechController =
-    remember(context) {
+    remember(appContext) {
       AndroidSpeechRecognizerController(
-        context = context,
+        context = appContext,
         onReady = { viewModel.onVoiceListeningStarted() },
         onRmsChanged = { level -> viewModel.onVoiceRmsChanged(level) },
         onPartialResult = { partial -> viewModel.onVoicePartialResult(partial) },
         onFinalResult = { transcript -> viewModel.onVoiceFinalResult(transcript) },
-        onError = { errMsg -> viewModel.onVoiceError(errMsg) },
+        onError = { errMsg -> routeVoiceFailureToTvAssistant(errMsg) },
       )
     }
 
@@ -170,30 +176,45 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
     ) { result ->
       if (result.resultCode == Activity.RESULT_OK) {
         val spoken =
-          result.data
-            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-            ?.firstOrNull()
-            ?.trim()
+          runCatching {
+            result.data
+              ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+              ?.firstOrNull()
+              ?.trim()
+          }.getOrNull()
         if (!spoken.isNullOrEmpty()) {
           viewModel.onVoiceFinalResult(spoken)
+        } else {
+          routeVoiceFailureToTvAssistant("No spoken text captured — sent directly to TV Assistant.")
         }
+      } else {
+        routeVoiceFailureToTvAssistant("Voice capture cancelled — sent directly to TV Assistant.")
       }
     }
 
   val launchSpeechCapture: () -> Unit = {
-    if (speechController.isAvailable()) {
-      viewModel.onVoiceListeningStarted()
+    if (!checkPermissionSafe(context, Manifest.permission.RECORD_AUDIO)) {
+      routeVoiceFailureToTvAssistant("Microphone permission unavailable — sent directly to TV Assistant.")
+    } else if (speechController.isAvailable()) {
       speechController.startListening()
     } else {
       val fallbackIntent = AndroidSpeechRecognizerController.buildFallbackActivityIntent()
-      val canResolve = fallbackIntent.resolveActivity(context.packageManager) != null
+      val canResolve =
+        runCatching {
+          val pm = context.packageManager
+          fallbackIntent.resolveActivity(pm) != null
+        }.getOrDefault(false)
       if (canResolve) {
-        runCatching { fallbackSpeechLauncher.launch(fallbackIntent) }
-          .onFailure {
-            viewModel.onVoiceError("On-device speech service is unavailable. Use TV Assistant or type a command below.")
-          }
+        val launched = runCatching { fallbackSpeechLauncher.launch(fallbackIntent) }
+        if (launched.isFailure) {
+          routeVoiceFailureToTvAssistant(
+            "On-device speech service is unavailable — sent directly to TV Assistant."
+          )
+        }
       } else {
-        viewModel.onVoiceError("Speech recognition service is unavailable on this phone. Use TV Assistant or type a command below.")
+        routeVoiceFailureToTvAssistant(
+          "Speech recognition service is unavailable on this phone — sent directly to TV Assistant."
+        )
       }
     }
   }
@@ -206,17 +227,34 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
       if (granted) {
         launchSpeechCapture()
       } else {
-        viewModel.onVoiceError("Microphone permission denied. Allow Mic or tap TV Assistant.")
+        routeVoiceFailureToTvAssistant(
+          "Microphone permission denied — sent directly to TV Assistant."
+        )
       }
     }
 
-  val triggerVoiceInputFlow: () -> Unit = {
-    viewModel.openVoiceSheet(true)
-    if (hasMicPermission) {
+  LaunchedEffect(voiceLaunchRequestToken) {
+    if (voiceLaunchRequestToken <= 0) return@LaunchedEffect
+    autoAssistantFallbackUsedForAttempt = false
+    val micGrantedNow = checkPermissionSafe(context, Manifest.permission.RECORD_AUDIO)
+    hasMicPermission = micGrantedNow
+    if (micGrantedNow) {
       launchSpeechCapture()
     } else {
-      micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+      val permissionRequestResult =
+        runCatching { micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) }
+      if (permissionRequestResult.isFailure) {
+        routeVoiceFailureToTvAssistant(
+          "Unable to prompt for microphone access — sent directly to TV Assistant."
+        )
+      }
     }
+  }
+
+  val triggerVoiceInputFlow: () -> Unit = {
+    autoAssistantFallbackUsedForAttempt = false
+    viewModel.openVoiceSheet(true)
+    voiceLaunchRequestToken++
   }
 
   val lifecycleOwner = LocalLifecycleOwner.current
@@ -224,9 +262,7 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
     val observer = LifecycleEventObserver { _, event ->
       when (event) {
         Lifecycle.Event.ON_START -> {
-          hasMicPermission =
-            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-              PackageManager.PERMISSION_GRANTED
+          hasMicPermission = checkPermissionSafe(context, Manifest.permission.RECORD_AUDIO)
           viewModel.onAppForegrounded()
         }
         Lifecycle.Event.ON_STOP -> {
@@ -289,7 +325,9 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
           ConnectionHubView(
             uiState = uiState,
             hasWifiScanPermission = hasWifiPermission,
-            onRequestScanPermission = { permissionLauncher.launch(requiredPermissions) },
+            onRequestScanPermission = {
+              runCatching { permissionLauncher.launch(requiredPermissions) }
+            },
             onStartScan = { viewModel.startDiscoveryScan() },
             onStopScan = { viewModel.stopDiscoveryScan() },
             onOpenManualIp = { showManualIpDialog = true },
@@ -437,10 +475,8 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
       onToggleAutoReconnect = { viewModel.updateAutoReconnect(it) },
       onToggleAutoCheckUpdates = { enabled ->
         if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-          if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
-            PackageManager.PERMISSION_GRANTED
-          ) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+          if (!checkPermissionSafe(context, Manifest.permission.POST_NOTIFICATIONS)) {
+            runCatching { notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
           }
         }
         viewModel.updateAutoCheckUpdates(enabled)
@@ -559,10 +595,17 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
         viewModel.openVoiceSheet(false)
       },
       onStartListening = {
-        if (hasMicPermission) {
+        autoAssistantFallbackUsedForAttempt = false
+        if (checkPermissionSafe(context, Manifest.permission.RECORD_AUDIO)) {
+          hasMicPermission = true
           launchSpeechCapture()
         } else {
-          micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+          val res = runCatching { micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) }
+          if (res.isFailure) {
+            routeVoiceFailureToTvAssistant(
+              "Unable to open microphone prompt — sent directly to TV Assistant."
+            )
+          }
         }
       },
       onStopListening = {
@@ -570,17 +613,30 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
         viewModel.onVoiceListeningStopped()
       },
       onRequestMicPermission = {
-        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        autoAssistantFallbackUsedForAttempt = false
+        val res = runCatching { micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) }
+        if (res.isFailure) {
+          routeVoiceFailureToTvAssistant(
+            "Unable to open microphone prompt — sent directly to TV Assistant."
+          )
+        }
       },
       onTriggerTvAssistant = {
+        speechController.stopListening()
         viewModel.triggerTvVoiceAssistant()
       },
       onRunVoiceCommandText = { phrase ->
+        speechController.stopListening()
         viewModel.onVoiceFinalResult(phrase)
       },
     )
   }
 }
+
+private fun checkPermissionSafe(context: Context, permission: String): Boolean =
+  runCatching {
+    ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+  }.getOrDefault(false)
 
 @Composable
 fun RemoteControlScreen(

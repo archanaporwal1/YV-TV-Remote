@@ -1495,4 +1495,142 @@ class ExampleRobolectricTest {
     org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
     serverThread.join(1_500L)
   }
+
+  @Test
+  fun `fallbackToTvVoiceAssistant sends KEYCODE_VOICE_ASSIST and speech controller and feedback manager never throw`() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val certManager = CertificateManager(app)
+    val serverKeyStore = certManager.ensureClientIdentity()
+    val kmf =
+      javax.net.ssl.KeyManagerFactory.getInstance(
+        javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
+      ).apply {
+        init(serverKeyStore, "yvtv_remote_keystore_pass".toCharArray())
+      }
+    val trustAll =
+      object : javax.net.ssl.X509TrustManager {
+        override fun checkClientTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+
+        override fun checkServerTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+
+        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+      }
+    val serverSslContext =
+      javax.net.ssl.SSLContext.getInstance("TLS").apply {
+        init(kmf.keyManagers, arrayOf<javax.net.ssl.TrustManager>(trustAll), null)
+      }
+    val serverSocket =
+      (serverSslContext.serverSocketFactory.createServerSocket(0) as javax.net.ssl.SSLServerSocket)
+        .apply {
+          needClientAuth = false
+        }
+
+    val voiceAssistLatch = java.util.concurrent.CountDownLatch(1)
+    val serverThread =
+      Thread {
+        try {
+          val client = serverSocket.accept() as javax.net.ssl.SSLSocket
+          client.startHandshake()
+          val configureMsg =
+            com.example.proto.remote.RemoteMessage.newBuilder()
+              .setRemoteConfigure(
+                com.example.proto.remote.RemoteConfigure.newBuilder()
+                  .setCode1(622)
+                  .build()
+              )
+              .build()
+          com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, configureMsg)
+
+          val input = client.inputStream
+          while (!client.isClosed) {
+            val frame = com.example.remote.protocol.DelimitedStreamHelper.readDelimitedBytes(input) ?: break
+            val msg = com.example.proto.remote.RemoteMessage.parseFrom(frame)
+            if (msg.hasRemoteKeyInject() &&
+              msg.remoteKeyInject.keyCode == com.example.proto.remote.RemoteKeyCode.KEYCODE_VOICE_ASSIST
+            ) {
+              voiceAssistLatch.countDown()
+            }
+          }
+          client.close()
+        } catch (_: Throwable) {
+        } finally {
+          try {
+            serverSocket.close()
+          } catch (_: Exception) {
+          }
+        }
+      }.apply { start() }
+
+    fun pumpMainLooperUntil(timeoutMs: Long = 5_000L, condition: () -> Boolean): Boolean {
+      val mainLooperShadow = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+      val deadline = System.currentTimeMillis() + timeoutMs
+      while (System.currentTimeMillis() < deadline) {
+        mainLooperShadow.idle()
+        if (condition()) return true
+        Thread.sleep(25L)
+        mainLooperShadow.idleFor(java.time.Duration.ofMillis(25))
+      }
+      mainLooperShadow.idle()
+      return condition()
+    }
+
+    val viewModel = com.example.remote.ui.RemoteViewModel(app)
+    viewModel.connectManualIp("127.0.0.1", serverSocket.localPort, "Living Room TV")
+    assertTrue(
+      pumpMainLooperUntil {
+        viewModel.uiState.value.connectionStatus is com.example.remote.ui.ConnectionStatus.Connected
+      }
+    )
+
+    viewModel.fallbackToTvVoiceAssistant("Speech recognition service unavailable")
+    assertTrue(
+      "Expected KEYCODE_VOICE_ASSIST dispatched on automatic fallback",
+      voiceAssistLatch.await(3, java.util.concurrent.TimeUnit.SECONDS),
+    )
+    assertEquals(
+      "Sent directly to TV Assistant",
+      viewModel.uiState.value.voiceState.executedActionLabel,
+    )
+    assertEquals(false, viewModel.uiState.value.voiceState.isListening)
+    assertEquals(
+      "Speech recognition service unavailable",
+      viewModel.uiState.value.voiceState.errorMessage,
+    )
+
+    // FeedbackManager rapid triggers + release + post-release trigger must never crash
+    val feedback = com.example.remote.feedback.FeedbackManager(app)
+    val feedbackSettings = AppSettings(hapticsEnabled = true, soundEnabled = true, soundVolume = 0.8f)
+    repeat(10) {
+      feedback.trigger(com.example.remote.feedback.FeedbackCue.NAV_TICK, feedbackSettings)
+    }
+    feedback.release()
+    feedback.trigger(com.example.remote.feedback.FeedbackCue.CONFIRM_CHIME, feedbackSettings)
+
+    // AndroidSpeechRecognizerController safely reports error without crashing when unavailable
+    var reportedError: String? = null
+    val controller =
+      com.example.remote.voice.AndroidSpeechRecognizerController(
+        context = app,
+        onReady = {},
+        onRmsChanged = {},
+        onPartialResult = {},
+        onFinalResult = {},
+        onError = { reportedError = it },
+      )
+    controller.startListening()
+    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+    controller.stopListening()
+    controller.destroy()
+    assertTrue("Expected safe error message or unavailable notice", reportedError == null || reportedError!!.isNotBlank())
+
+    viewModel.disconnect()
+    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+    serverThread.join(1_500L)
+  }
 }

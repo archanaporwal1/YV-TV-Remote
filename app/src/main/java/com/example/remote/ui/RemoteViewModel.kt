@@ -39,6 +39,8 @@ import com.example.remote.update.UpdateCheckResult
 import com.example.remote.voice.ParsedVoiceCommand
 import com.example.remote.voice.TvVoiceAudioStreamer
 import com.example.remote.voice.VoiceCommandParser
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -163,6 +165,16 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   private var networkCallback: ConnectivityManager.NetworkCallback? = null
   private var hasSeenInitialNetworkCallback = false
   private val reconnectMutex = Mutex()
+  private val safeCoroutineHandler =
+    CoroutineExceptionHandler { _, throwable ->
+      if (throwable is VirtualMachineError) throw throwable
+      _uiState.update { state ->
+        state.copy(
+          statusBannerMessage = throwable.message?.takeIf { it.isNotBlank() }
+            ?: "Recovered from an unexpected remote operation error.",
+        )
+      }
+    }
 
   private val tvVoiceAudioStreamer =
     TvVoiceAudioStreamer(
@@ -179,7 +191,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     )
 
   init {
-    loadStoredState()
+    runCatching { loadStoredState() }
     observeDiscovery()
     observeRemoteSession()
     observeTvImeState()
@@ -190,7 +202,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   }
 
   private fun observeTvImeState() {
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       remoteClient.imeState.collect { ime ->
         _uiState.update { it.copy(tvImeState = ime) }
       }
@@ -198,7 +210,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   }
 
   private fun observeVoiceSessionRequests() {
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       remoteClient.voiceSessionRequest.collect { sessionId ->
         if (sessionId != null) {
           _uiState.update { state ->
@@ -241,17 +253,17 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   }
 
   private fun observeDiscovery() {
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       discoveryManager.discoveredTvs.collect { list ->
         _uiState.update { it.copy(discoveredTvs = list) }
       }
     }
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       discoveryManager.isScanning.collect { scanning ->
         _uiState.update { it.copy(isScanning = scanning) }
       }
     }
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       discoveryManager.scanError.collect { err ->
         _uiState.update { it.copy(scanError = err) }
       }
@@ -259,7 +271,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   }
 
   private fun observeRemoteSession() {
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       remoteClient.sessionEvent.collect { event ->
         when (event) {
           is RemoteControlClient.SessionEvent.Disconnected -> {
@@ -555,7 +567,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
       autoReconnectJob?.cancel()
     }
     autoReconnectJob =
-      viewModelScope.launch {
+      viewModelScope.launch(safeCoroutineHandler) {
         if (delayMs > 0L) {
           delay(delayMs)
         }
@@ -718,7 +730,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
           )
       )
     }
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       reconnectMutex.withLock {
         remoteClient.connect(target.ipAddress, target.controlPort)
       }
@@ -727,7 +739,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
   private fun initiatePairing(target: PendingConnectionTarget) {
     cancelPairingInternal()
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       _uiState.update {
         it.copy(
           connectionStatus =
@@ -798,7 +810,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
       )
     }
 
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       when (val result = session.submitPin(pin)) {
         is PairingClient.PinSubmitResult.Success -> {
           activePairingSession = null
@@ -925,22 +937,25 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   }
 
   fun sendKeyboardImeText(newText: String, previousText: String) {
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       remoteClient.sendImeText(newText = newText, previousLength = previousText.length)
     }
   }
 
   fun submitKeyboardSearch(text: String, useDirectKeys: Boolean) {
+    val clean = text.trim()
     feedbackManager.trigger(FeedbackCue.CONFIRM_CHIME, _uiState.value.settings)
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       val sent =
         sendWithAutoRecovery {
           val textOk =
-            if (useDirectKeys) {
-              remoteClient.sendTextAsKeyEvents(text)
+            if (clean.isEmpty()) {
+              true
+            } else if (useDirectKeys) {
+              remoteClient.sendTextAsKeyEvents(clean)
             } else {
               val prevLen = _uiState.value.tvImeState.currentText.length
-              remoteClient.sendImeText(newText = text, previousLength = prevLen)
+              remoteClient.sendImeText(newText = clean, previousLength = prevLen)
             }
           if (textOk) {
             remoteClient.sendKey(RemoteKeyCode.KEYCODE_ENTER, RemoteDirection.SHORT)
@@ -1047,6 +1062,30 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     }
   }
 
+  fun fallbackToTvVoiceAssistant(reason: String) {
+    sendKey(RemoteKeyCode.KEYCODE_VOICE_ASSIST, FeedbackCue.POWER_OR_APP)
+    val connected = _uiState.value.connectionStatus is ConnectionStatus.Connected
+    val banner =
+      if (connected) {
+        "Opened TV Assistant on your TV."
+      } else {
+        "$reason Connect to a TV to open TV Assistant."
+      }
+    _uiState.update { state ->
+      state.copy(
+        voiceState =
+          state.voiceState.copy(
+            isListening = false,
+            rmsLevel = 0f,
+            partialTranscript = "",
+            executedActionLabel = "Sent directly to TV Assistant",
+            errorMessage = reason,
+          ),
+        statusBannerMessage = banner,
+      )
+    }
+  }
+
   fun onVoiceFinalResult(transcript: String) {
     val clean = transcript.trim()
     if (clean.isEmpty()) return
@@ -1056,7 +1095,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
       (uiPrefs.customShortcuts + TvAppShortcuts.all + TvAppShortcuts.popularAddableCatalog)
         .distinctBy { it.id }
 
-    val parsed = VoiceCommandParser.parse(clean, allShortcuts) ?: return
+    val parsed =
+      runCatching { VoiceCommandParser.parse(clean, allShortcuts) }.getOrNull() ?: return
 
     val actionLabel =
       when (parsed) {
@@ -1091,8 +1131,10 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   }
 
   private fun executeVoiceTvSearch(query: String) {
+    val cleanQuery = query.trim()
+    if (cleanQuery.isEmpty()) return
     feedbackManager.trigger(FeedbackCue.CONFIRM_CHIME, _uiState.value.settings)
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       val sent =
         sendWithAutoRecovery {
           val wasImeFocused = _uiState.value.tvImeState.isImeRequested
@@ -1104,9 +1146,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
           val imeState = _uiState.value.tvImeState
           val textOk =
             if (imeState.isImeRequested) {
-              remoteClient.sendImeText(newText = query, previousLength = imeState.currentText.length)
+              remoteClient.sendImeText(newText = cleanQuery, previousLength = imeState.currentText.length)
             } else {
-              remoteClient.sendTextAsKeyEvents(query)
+              remoteClient.sendTextAsKeyEvents(cleanQuery)
             }
           if (textOk) {
             remoteClient.sendKey(RemoteKeyCode.KEYCODE_ENTER, RemoteDirection.SHORT)
@@ -1132,6 +1174,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
       state.copy(
         voiceState =
           state.voiceState.copy(
+            isListening = false,
+            rmsLevel = 0f,
             executedActionLabel = "Triggered TV Voice Assistant",
             errorMessage = null,
           )
@@ -1150,7 +1194,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     direction: RemoteDirection = RemoteDirection.SHORT,
   ) {
     feedbackManager.trigger(cue, _uiState.value.settings)
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       val sent = sendWithAutoRecovery { remoteClient.sendKey(keyCode, direction) }
       if (!sent && _uiState.value.connectionStatus !is ConnectionStatus.Connected) {
         _uiState.update {
@@ -1167,7 +1211,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   fun onKeyHoldStart(keyCode: RemoteKeyCode, cue: FeedbackCue = FeedbackCue.NAV_TICK) {
     feedbackManager.trigger(cue, _uiState.value.settings)
     activeHeldKey = keyCode
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       val sent = sendWithAutoRecovery { remoteClient.sendKey(keyCode, RemoteDirection.START_LONG) }
       if (!sent) {
         if (activeHeldKey == keyCode) activeHeldKey = null
@@ -1188,7 +1232,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     if (activeHeldKey == keyCode) {
       activeHeldKey = null
     }
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       if (remoteClient.isConnectionHealthy()) {
         remoteClient.sendKey(keyCode, RemoteDirection.END_LONG)
       }
@@ -1198,7 +1242,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   private fun releaseHeldKeyIfNeeded() {
     val held = activeHeldKey ?: return
     activeHeldKey = null
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       if (remoteClient.isConnectionHealthy()) {
         remoteClient.sendKey(held, RemoteDirection.END_LONG)
       }
@@ -1217,7 +1261,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     }
     ottLaunchJob?.cancel()
     ottLaunchJob =
-      viewModelScope.launch {
+      viewModelScope.launch(safeCoroutineHandler) {
         if (!ensureConnectedForCommand()) {
           _uiState.update {
             it.copy(
@@ -1485,7 +1529,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         updateStatusMessage = if (manual) "Checking for updates..." else it.updateStatusMessage,
       )
     }
-    viewModelScope.launch {
+    viewModelScope.launch(safeCoroutineHandler) {
       when (val result = AppUpdateManager.checkForUpdate(settings.releaseRepoOverride)) {
         is UpdateCheckResult.UpdateAvailable -> {
           val release = result.release

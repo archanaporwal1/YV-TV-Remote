@@ -89,17 +89,27 @@ class TvDiscoveryManager(context: Context) {
         }
 
         override fun onServiceFound(service: NsdServiceInfo) {
-          if (service.serviceType.contains(SERVICE_TYPE_MATCH) &&
-            queuedServices.add(service.serviceName)
-          ) {
-            resolveQueueChannel?.trySend(service)
+          runCatching {
+            val type = service.serviceType.orEmpty()
+            val name = service.serviceName.orEmpty()
+            if (type.contains(SERVICE_TYPE_MATCH) &&
+              name.isNotBlank() &&
+              queuedServices.add(name)
+            ) {
+              resolveQueueChannel?.trySend(service)
+            }
           }
         }
 
         override fun onServiceLost(service: NsdServiceInfo) {
-          queuedServices.remove(service.serviceName)
-          _discoveredTvs.update { current ->
-            current.filterNot { it.serviceName == service.serviceName }
+          runCatching {
+            val name = service.serviceName.orEmpty()
+            if (name.isNotBlank()) {
+              queuedServices.remove(name)
+              _discoveredTvs.update { current ->
+                current.filterNot { it.serviceName == name }
+              }
+            }
           }
         }
 
@@ -122,9 +132,9 @@ class TvDiscoveryManager(context: Context) {
     try {
       manager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
       _isScanning.value = true
-    } catch (e: Exception) {
+    } catch (t: Throwable) {
       _isScanning.value = false
-      _scanError.value = e.message ?: "Unable to start mDNS discovery."
+      _scanError.value = t.message ?: "Unable to start mDNS discovery."
       stopScanInternal()
     }
   }
@@ -138,11 +148,11 @@ class TvDiscoveryManager(context: Context) {
     discoveryListener?.let { listener ->
       try {
         nsdManager?.stopServiceDiscovery(listener)
-      } catch (_: Exception) {
+      } catch (_: Throwable) {
       }
     }
     discoveryListener = null
-    resolveQueueChannel?.close()
+    runCatching { resolveQueueChannel?.close() }
     resolveQueueChannel = null
     resolveWorkerJob?.cancel()
     resolveWorkerJob = null
@@ -169,32 +179,31 @@ class TvDiscoveryManager(context: Context) {
 
                 override fun onServiceResolved(resolvedService: NsdServiceInfo) {
                   if (!completed.compareAndSet(false, true) || !continuation.isActive) return
-
-                  val ipv4Address = extractIpv4Address(resolvedService)
-                  if (ipv4Address.isNullOrBlank()) {
-                    continuation.resume(false to null)
-                    return
-                  }
-
-                  val friendlyName =
-                    extractFriendlyName(resolvedService)
-                      ?: resolvedService.serviceName.ifBlank { "Android TV" }
-
-                  continuation.resume(
-                    false to
-                      DiscoveredTv(
-                        serviceName = resolvedService.serviceName,
-                        displayName = friendlyName,
-                        ipAddress = ipv4Address,
-                        port = resolvedService.port.takeIf { it > 0 } ?: DEFAULT_REMOTE_PORT,
-                      )
-                  )
+                  val tv =
+                    runCatching {
+                      val ipv4Address = extractIpv4Address(resolvedService)
+                      if (ipv4Address.isNullOrBlank()) {
+                        null
+                      } else {
+                        val svcName = resolvedService.serviceName.orEmpty()
+                        val friendlyName =
+                          extractFriendlyName(resolvedService)
+                            ?: svcName.ifBlank { "Android TV" }
+                        DiscoveredTv(
+                          serviceName = svcName,
+                          displayName = friendlyName,
+                          ipAddress = ipv4Address,
+                          port = resolvedService.port.takeIf { it > 0 } ?: DEFAULT_REMOTE_PORT,
+                        )
+                      }
+                    }.getOrNull()
+                  continuation.resume(false to tv)
                 }
               }
 
             try {
               manager.resolveService(serviceInfo, resolveListener)
-            } catch (_: Exception) {
+            } catch (_: Throwable) {
               if (completed.compareAndSet(false, true) && continuation.isActive) {
                 continuation.resume(false to null)
               }
@@ -214,15 +223,15 @@ class TvDiscoveryManager(context: Context) {
   @Suppress("DEPRECATION")
   private fun extractIpv4Address(serviceInfo: NsdServiceInfo): String? {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-      val ipv4 = serviceInfo.hostAddresses.firstOrNull { it is Inet4Address }
+      val ipv4 = runCatching { serviceInfo.hostAddresses.firstOrNull { it is Inet4Address } }.getOrNull()
       if (ipv4?.hostAddress != null) return ipv4.hostAddress
     }
-    val host = serviceInfo.host
+    val host = runCatching { serviceInfo.host }.getOrNull()
     return if (host is Inet4Address) host.hostAddress else host?.hostAddress?.takeIf { !it.contains(':') }
   }
 
   private fun extractFriendlyName(serviceInfo: NsdServiceInfo): String? {
-    val attributes = serviceInfo.attributes ?: return null
+    val attributes = runCatching { serviceInfo.attributes }.getOrNull() ?: return null
     val rawName = attributes["fn"] ?: attributes["n"] ?: return null
     return rawName.toString(Charsets.UTF_8).trim().takeIf { it.isNotEmpty() }
   }
@@ -235,7 +244,7 @@ class TvDiscoveryManager(context: Context) {
         acquire()
       }
       multicastLock = lock
-    } catch (_: Exception) {
+    } catch (_: Throwable) {
     }
   }
 
@@ -244,7 +253,7 @@ class TvDiscoveryManager(context: Context) {
       if (multicastLock?.isHeld == true) {
         multicastLock?.release()
       }
-    } catch (_: Exception) {
+    } catch (_: Throwable) {
     } finally {
       multicastLock = null
     }

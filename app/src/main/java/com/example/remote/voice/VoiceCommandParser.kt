@@ -25,6 +25,7 @@ sealed class ParsedVoiceCommand {
 
 object VoiceCommandParser {
 
+  private val politePrefixes = listOf("please ", "can you ", "hey tv ", "tv ")
   private val ottVerbs = listOf("open ", "launch ", "start ", "run ", "switch to ", "go to ")
   private val searchPrefixes = listOf("search for ", "search ", "find ", "look up ", "play ")
 
@@ -35,16 +36,25 @@ object VoiceCommandParser {
     val raw = transcript.trim()
     if (raw.isEmpty()) return null
 
+    var strippedRaw = raw
+    var changed = true
+    while (changed) {
+      changed = false
+      val lower = strippedRaw.lowercase()
+      for (prefix in politePrefixes) {
+        if (lower.startsWith(prefix)) {
+          strippedRaw = strippedRaw.substring(prefix.length).trimStart()
+          changed = true
+          break
+        }
+      }
+    }
+
     val normalized =
-      raw
+      strippedRaw
         .lowercase()
         .replace(Regex("[^a-z0-9+\\s]"), " ")
         .replace(Regex("\\s+"), " ")
-        .trim()
-        .removePrefix("please ")
-        .removePrefix("can you ")
-        .removePrefix("hey tv ")
-        .removePrefix("tv ")
         .trim()
 
     if (normalized.isEmpty()) return null
@@ -74,9 +84,18 @@ object VoiceCommandParser {
     }
 
     // 3. Explicit search / query command
+    val strippedLower = strippedRaw.lowercase()
     for (prefix in searchPrefixes) {
-      if (normalized.startsWith(prefix)) {
-        val cleaned = raw.trim().drop(prefix.length).trim()
+      if (strippedLower.startsWith(prefix)) {
+        val cleaned = strippedRaw.substring(prefix.length).trim()
+        if (cleaned.isNotEmpty()) {
+          return ParsedVoiceCommand.SearchOrType(
+            query = cleaned,
+            label = "Searching TV for \"$cleaned\"",
+          )
+        }
+      } else if (normalized.startsWith(prefix)) {
+        val cleaned = normalized.removePrefix(prefix).trim()
         if (cleaned.isNotEmpty()) {
           return ParsedVoiceCommand.SearchOrType(
             query = cleaned,
@@ -87,9 +106,10 @@ object VoiceCommandParser {
     }
 
     // 4. Fallback: send natural speech as TV search query
+    val fallbackQuery = strippedRaw.ifBlank { raw }
     return ParsedVoiceCommand.SearchOrType(
-      query = raw,
-      label = "Searching TV for \"$raw\"",
+      query = fallbackQuery,
+      label = "Searching TV for \"$fallbackQuery\"",
     )
   }
 

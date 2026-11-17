@@ -172,10 +172,12 @@ fun KeyboardSearchSheet(
       OutlinedTextField(
         value = query,
         onValueChange = { updated ->
-          val prev = query
-          query = updated
-          if (!useDirectKeys) {
-            onLiveImeChange(updated, prev)
+          runCatching {
+            val prev = query
+            query = updated
+            if (!useDirectKeys) {
+              onLiveImeChange(updated, prev)
+            }
           }
         },
         label = { Text("Search or Type on TV") },
@@ -185,10 +187,12 @@ fun KeyboardSearchSheet(
           if (query.isNotEmpty()) {
             IconButton(
               onClick = {
-                val prev = query
-                query = ""
-                if (!useDirectKeys) {
-                  onLiveImeChange("", prev)
+                runCatching {
+                  val prev = query
+                  query = ""
+                  if (!useDirectKeys) {
+                    onLiveImeChange("", prev)
+                  }
                 }
               },
               modifier = Modifier.testTag("keyboard_clear_button"),
@@ -207,7 +211,7 @@ fun KeyboardSearchSheet(
           ),
         keyboardActions =
           KeyboardActions(
-            onSearch = { onSubmitSearch(query, useDirectKeys) },
+            onSearch = { runCatching { onSubmitSearch(query, useDirectKeys) } },
           ),
         colors =
           OutlinedTextFieldDefaults.colors(
@@ -243,7 +247,7 @@ fun KeyboardSearchSheet(
         }
 
         Button(
-          onClick = { onSubmitSearch(query, useDirectKeys) },
+          onClick = { runCatching { onSubmitSearch(query, useDirectKeys) } },
           contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
           colors =
             ButtonDefaults.buttonColors(
@@ -275,13 +279,13 @@ fun KeyboardSearchSheet(
         KeyboardQuickActionChip(
           icon = Icons.Rounded.Mic,
           label = "Voice",
-          onClick = { onOpenVoiceInput() },
+          onClick = { runCatching { onOpenVoiceInput() } },
           modifier = Modifier.weight(1f).testTag("keyboard_voice_btn"),
         )
         KeyboardQuickActionChip(
           icon = Icons.Rounded.SpaceBar,
           label = "Space",
-          onClick = { onSendKey(RemoteKeyCode.KEYCODE_SPACE, FeedbackCue.NAV_TICK) },
+          onClick = { runCatching { onSendKey(RemoteKeyCode.KEYCODE_SPACE, FeedbackCue.NAV_TICK) } },
           modifier = Modifier.weight(1f).testTag("keyboard_space_btn"),
         )
         KeyboardQuickActionChip(

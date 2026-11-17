@@ -108,15 +108,23 @@ class MainActivityLaunchTest {
       .performScrollToNode(hasTestTag("voice_transcript_card"))
     composeTestRule.onNodeWithTag("voice_executed_label").assertIsDisplayed()
     composeTestRule.onNodeWithTag("voice_command_sheet")
+      .performScrollToNode(hasTestTag("voice_manual_command_input"))
+    composeTestRule.onNodeWithTag("voice_manual_command_input").performTextInput("Please search for Inception")
+    composeTestRule.onNodeWithTag("voice_manual_send_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("voice_command_sheet")
       .performScrollToNode(hasTestTag("voice_sheet_close_button"))
     composeTestRule.onNodeWithTag("voice_sheet_close_button").performClick()
     composeTestRule.waitForIdle()
 
-    // Open Keyboard sheet and close it cleanly
+    // Open Keyboard sheet, test Voice handoff from keyboard, and close cleanly
     composeTestRule.onNodeWithTag("btn_open_keyboard").performClick()
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithTag("keyboard_search_input").assertIsDisplayed()
-    composeTestRule.onNodeWithTag("keyboard_close_button").performClick()
+    composeTestRule.onNodeWithTag("keyboard_voice_btn").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("voice_command_sheet").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("voice_sheet_close_button").performClick()
     composeTestRule.waitForIdle()
 
     // Open Customize UI sheet from Remote top bar, test Light/Dark theme, Minimalist preset & reset

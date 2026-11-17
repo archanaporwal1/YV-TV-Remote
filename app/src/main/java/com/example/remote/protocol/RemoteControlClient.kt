@@ -362,6 +362,8 @@ class RemoteControlClient(
             SessionEvent.ConnectionLost("TV connection closed while idle or switching apps.")
         }
       }
+    } catch (ce: kotlinx.coroutines.CancellationException) {
+      throw ce
     } catch (e: SSLException) {
       if (sessionScope.isActive && socket === sslSocket) {
         if (isCertificateOrHandshakeError(e) || !hasReceivedMessage) {
@@ -374,10 +376,11 @@ class RemoteControlClient(
             SessionEvent.ConnectionLost(e.message ?: "TLS connection to TV was interrupted.")
         }
       }
-    } catch (e: Exception) {
+    } catch (t: Throwable) {
+      if (t is VirtualMachineError) throw t
       if (sessionScope.isActive && socket === sslSocket) {
         _sessionEvent.value =
-          SessionEvent.ConnectionLost(e.message ?: "Connection to TV was interrupted.")
+          SessionEvent.ConnectionLost(t.message ?: "Connection to TV was interrupted.")
       }
     } finally {
       cleanupSocketOnly(expectedSocket = sslSocket)
@@ -603,6 +606,8 @@ class RemoteControlClient(
         try {
           DelimitedStreamHelper.writeMessage(out, message)
           true
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+          throw ce
         } catch (e: SSLException) {
           _sessionEvent.value =
             if (isCertificateOrHandshakeError(e)) {
@@ -614,7 +619,7 @@ class RemoteControlClient(
             }
           cleanupSocketOnly(expectedSocket = sock)
           false
-        } catch (e: IOException) {
+        } catch (e: Exception) {
           _sessionEvent.value =
             SessionEvent.ConnectionLost(e.message ?: "Failed to send command to TV.")
           cleanupSocketOnly(expectedSocket = sock)

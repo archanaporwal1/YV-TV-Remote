@@ -103,9 +103,13 @@ class PairingClient(private val certificateManager: CertificateManager) {
 
         close()
         PinSubmitResult.Success
-      } catch (e: Exception) {
+      } catch (ce: kotlinx.coroutines.CancellationException) {
         close()
-        PinSubmitResult.ConnectionLost(e.message ?: "Pairing connection interrupted.")
+        throw ce
+      } catch (t: Throwable) {
+        if (t is VirtualMachineError) throw t
+        close()
+        PinSubmitResult.ConnectionLost(t.message ?: "Pairing connection interrupted.")
       }
     }
 
@@ -221,12 +225,19 @@ class PairingClient(private val certificateManager: CertificateManager) {
             ),
           serverName = serverName,
         )
-      } catch (e: Exception) {
+      } catch (ce: kotlinx.coroutines.CancellationException) {
         try {
           socket?.close()
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
         }
-        PairingStartResult.Failed(e.message ?: "Failed to initiate pairing with $host:$port.")
+        throw ce
+      } catch (t: Throwable) {
+        if (t is VirtualMachineError) throw t
+        try {
+          socket?.close()
+        } catch (_: Throwable) {
+        }
+        PairingStartResult.Failed(t.message ?: "Failed to initiate pairing with $host:$port.")
       }
     }
 

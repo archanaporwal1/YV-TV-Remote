@@ -1,5 +1,6 @@
 package com.example.remote.protocol
 
+import android.content.Context
 import android.os.Build
 import com.example.proto.pairing.PairingConfiguration
 import com.example.proto.pairing.PairingEncoding
@@ -19,7 +20,10 @@ import java.security.MessageDigest
 import java.security.interfaces.RSAPublicKey
 import javax.net.ssl.SSLSocket
 
-class PairingClient(private val certificateManager: CertificateManager) {
+class PairingClient(
+  private val certificateManager: CertificateManager,
+  private val appContext: Context? = null,
+) {
 
   sealed class PairingStartResult {
     data class AwaitingPin(val session: ActivePairingSession, val serverName: String) :
@@ -123,14 +127,21 @@ class PairingClient(private val certificateManager: CertificateManager) {
 
   suspend fun startPairing(host: String, port: Int = DEFAULT_PAIRING_PORT): PairingStartResult =
     withContext(Dispatchers.IO) {
+      var plainSocket: java.net.Socket? = null
       var socket: SSLSocket? = null
       try {
         val tls = certificateManager.createTlsSessionContext()
+        plainSocket =
+          WifiNetworkBinder.createPlainSocket(appContext, host).apply {
+            keepAlive = true
+            tcpNoDelay = true
+            soTimeout = CONNECT_TIMEOUT_MS
+            connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+          }
         socket =
-          (tls.sslContext.socketFactory.createSocket() as SSLSocket).apply {
+          (tls.sslContext.socketFactory.createSocket(plainSocket, host, port, true) as SSLSocket).apply {
             useClientMode = true
             soTimeout = HANDSHAKE_TIMEOUT_MS
-            connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
             startHandshake()
           }
 
@@ -226,17 +237,13 @@ class PairingClient(private val certificateManager: CertificateManager) {
           serverName = serverName,
         )
       } catch (ce: kotlinx.coroutines.CancellationException) {
-        try {
-          socket?.close()
-        } catch (_: Throwable) {
-        }
+        runCatching { socket?.close() }
+        runCatching { plainSocket?.close() }
         throw ce
       } catch (t: Throwable) {
         if (t is VirtualMachineError) throw t
-        try {
-          socket?.close()
-        } catch (_: Throwable) {
-        }
+        runCatching { socket?.close() }
+        runCatching { plainSocket?.close() }
         PairingStartResult.Failed(t.message ?: "Failed to initiate pairing with $host:$port.")
       }
     }
@@ -251,7 +258,7 @@ class PairingClient(private val certificateManager: CertificateManager) {
   companion object {
     const val DEFAULT_PAIRING_PORT = 6467
     private const val PROTOCOL_VERSION = 2
-    private const val CLIENT_SERVICE_NAME = "com.example.yvtvremote"
+    private const val CLIENT_SERVICE_NAME = "in.yourview.yvtvremote"
     private const val CONNECT_TIMEOUT_MS = 8_000
     private const val HANDSHAKE_TIMEOUT_MS = 15_000
     private const val PIN_ENTRY_TIMEOUT_MS = 120_000

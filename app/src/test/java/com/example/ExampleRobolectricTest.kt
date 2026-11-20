@@ -981,7 +981,7 @@ class ExampleRobolectricTest {
       kotlinx.coroutines.delay(100L)
 
       assertEquals(1, configureCount.get())
-      assertEquals(639, configureFeatureCode.get())
+      assertEquals(622, configureFeatureCode.get())
       assertEquals(0, setActiveBeforeServerSetActive.get())
       assertEquals(1, totalSetActiveCount.get())
       assertTrue(client.isConnectionHealthy())
@@ -1028,6 +1028,7 @@ class ExampleRobolectricTest {
           }
 
       val serverPongsReceived = java.util.concurrent.atomic.AtomicInteger(0)
+      val unsolicitedClientPings = java.util.concurrent.atomic.AtomicInteger(0)
       val receivedAppLinks = java.util.Collections.synchronizedList(mutableListOf<String>())
       val browserFallbackReceivedLatch = java.util.concurrent.CountDownLatch(1)
       val netflix = com.example.remote.data.TvAppShortcuts.all.first { it.id == "netflix" }
@@ -1053,7 +1054,7 @@ class ExampleRobolectricTest {
                 try {
                   var seq = 1
                   while (!client.isClosed) {
-                    Thread.sleep(90L)
+                    Thread.sleep(60L)
                     val serverPing =
                       com.example.proto.remote.RemoteMessage.newBuilder()
                         .setRemotePingRequest(
@@ -1075,6 +1076,9 @@ class ExampleRobolectricTest {
               when {
                 msg.hasRemotePingResponse() -> {
                   serverPongsReceived.incrementAndGet()
+                }
+                msg.hasRemotePingRequest() -> {
+                  unsolicitedClientPings.incrementAndGet()
                 }
                 msg.hasRemoteAppLinkLaunchRequest() -> {
                   val link = msg.remoteAppLinkLaunchRequest.appLink
@@ -1110,9 +1114,9 @@ class ExampleRobolectricTest {
       val client =
         com.example.remote.protocol.RemoteControlClient(
           certificateManager = certManager,
-          keepaliveIntervalMs = 70L,
+          keepaliveIntervalMs = 180L,
           socketReadTimeoutMs = 150,
-          staleConnectionTimeoutMs = 280L,
+          staleConnectionTimeoutMs = 300L,
         )
       client.connect("127.0.0.1", serverSocket.localPort)
       val deadline = System.currentTimeMillis() + 5_000L
@@ -1121,13 +1125,18 @@ class ExampleRobolectricTest {
       }
       assertTrue(client.isConnectionHealthy())
 
-      // Wait past staleConnectionTimeoutMs while TV does NOT answer client pings (only sends server pings)
+      // Wait past staleConnectionTimeoutMs while TV drives pings; client must echo pongs and send 0 unsolicited pings
       kotlinx.coroutines.delay(500L)
       assertTrue(
-        "Server-initiated ping TVs must stay connected even if client pings go unanswered",
+        "Server-initiated ping TVs must stay connected without unsolicited client pings",
         client.isConnectionHealthy(),
       )
       assertTrue("Expected server ping responses, got ${serverPongsReceived.get()}", serverPongsReceived.get() >= 2)
+      assertEquals(
+        "Client must not send unsolicited RemotePingRequest after TV initiates pings",
+        0,
+        unsolicitedClientPings.get(),
+      )
 
       // Now simulate clicking Netflix when TV rejects every native probe with an UN-ECHOED RemoteError
       val outcome = client.launchAppWithPlan(netflixPlan, errorWaitMs = 120L)
@@ -1629,6 +1638,131 @@ class ExampleRobolectricTest {
     controller.destroy()
     assertTrue("Expected safe error message or unavailable notice", reportedError == null || reportedError!!.isNotBlank())
 
+    viewModel.disconnect()
+    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+    serverThread.join(1_500L)
+  }
+
+  @Test
+  fun `viewModel proactively heals stale background socket on foreground wake without showing error`() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val certManager = CertificateManager(app)
+    val serverKeyStore = certManager.ensureClientIdentity()
+    val kmf =
+      javax.net.ssl.KeyManagerFactory.getInstance(
+        javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
+      ).apply {
+        init(serverKeyStore, "yvtv_remote_keystore_pass".toCharArray())
+      }
+    val trustAll =
+      object : javax.net.ssl.X509TrustManager {
+        override fun checkClientTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+
+        override fun checkServerTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+
+        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+      }
+    val serverSslContext =
+      javax.net.ssl.SSLContext.getInstance("TLS").apply {
+        init(kmf.keyManagers, arrayOf<javax.net.ssl.TrustManager>(trustAll), null)
+      }
+    val serverSocket =
+      (serverSslContext.serverSocketFactory.createServerSocket(0) as javax.net.ssl.SSLServerSocket)
+        .apply {
+          needClientAuth = false
+        }
+
+    val acceptCount = java.util.concurrent.atomic.AtomicInteger(0)
+    val secondSessionLatch = java.util.concurrent.CountDownLatch(1)
+    val shutdownLatch = java.util.concurrent.CountDownLatch(1)
+    val acceptedSockets = java.util.Collections.synchronizedList(mutableListOf<javax.net.ssl.SSLSocket>())
+
+    val serverThread =
+      Thread {
+        try {
+          while (!serverSocket.isClosed && acceptCount.get() < 2) {
+            val client = serverSocket.accept() as javax.net.ssl.SSLSocket
+            acceptedSockets.add(client)
+            val num = acceptCount.incrementAndGet()
+            client.startHandshake()
+            val configureMsg =
+              com.example.proto.remote.RemoteMessage.newBuilder()
+                .setRemoteConfigure(
+                  com.example.proto.remote.RemoteConfigure.newBuilder()
+                    .setCode1(622)
+                    .build()
+                )
+                .build()
+            com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, configureMsg)
+            if (num == 2) {
+              secondSessionLatch.countDown()
+            }
+          }
+          shutdownLatch.await(4, java.util.concurrent.TimeUnit.SECONDS)
+        } catch (_: Throwable) {
+        } finally {
+          acceptedSockets.forEach { sock ->
+            try {
+              sock.close()
+            } catch (_: Exception) {
+            }
+          }
+          try {
+            serverSocket.close()
+          } catch (_: Exception) {
+          }
+        }
+      }.apply { start() }
+
+    fun pumpMainLooperUntil(timeoutMs: Long = 5_000L, condition: () -> Boolean): Boolean {
+      val mainLooperShadow = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+      val deadline = System.currentTimeMillis() + timeoutMs
+      while (System.currentTimeMillis() < deadline) {
+        mainLooperShadow.idle()
+        if (condition()) return true
+        Thread.sleep(25L)
+        mainLooperShadow.idleFor(java.time.Duration.ofMillis(25))
+      }
+      mainLooperShadow.idle()
+      return condition()
+    }
+
+    val viewModel = com.example.remote.ui.RemoteViewModel(app)
+    viewModel.connectManualIp("127.0.0.1", serverSocket.localPort, "Living Room TV")
+    assertTrue(
+      pumpMainLooperUntil {
+        viewModel.uiState.value.connectionStatus is com.example.remote.ui.ConnectionStatus.Connected
+      }
+    )
+    assertEquals(1, acceptCount.get())
+
+    // Simulate switching apps / screen lock while first socket stays silently open (half-open zombie)
+    viewModel.onAppBackgrounded()
+    viewModel.markBackgroundedAtForTest(
+      System.currentTimeMillis() - com.example.remote.ui.RemoteViewModel.BACKGROUND_PROACTIVE_RECONNECT_MS - 1_000L
+    )
+
+    // Returning to foreground must proactively heal into a fresh TLS session cleanly without Error state
+    viewModel.onAppForegrounded()
+    assertTrue(
+      "Expected proactive foreground wake heal to establish a fresh session (status=${viewModel.uiState.value.connectionStatus}, accepts=${acceptCount.get()})",
+      pumpMainLooperUntil { secondSessionLatch.count == 0L },
+    )
+    assertTrue(
+      "Expected Connected after proactive wake heal, got ${viewModel.uiState.value.connectionStatus}",
+      pumpMainLooperUntil {
+        viewModel.uiState.value.connectionStatus is com.example.remote.ui.ConnectionStatus.Connected
+      }
+    )
+    assertEquals(2, acceptCount.get())
+
+    shutdownLatch.countDown()
     viewModel.disconnect()
     org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
     serverThread.join(1_500L)

@@ -182,7 +182,7 @@ fun ConnectionHubView(
                 overflow = TextOverflow.Ellipsis,
               )
               Text(
-                text = "Android TV & Google TV Controller",
+                text = "by YourView • yourview.in",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -605,6 +605,74 @@ private fun RadarScannerScope(
   val crosshairColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
   val coreColor = MaterialTheme.colorScheme.primaryContainer
 
+  Box(
+    modifier = modifier,
+    contentAlignment = Alignment.Center,
+  ) {
+    if (isScanning) {
+      ActiveRadarAnimatedCanvas(
+        primaryColor = primaryColor,
+        crosshairColor = crosshairColor,
+        coreColor = coreColor,
+        modifier = Modifier.fillMaxSize(),
+      )
+    } else {
+      Canvas(modifier = Modifier.fillMaxSize()) {
+        val maxRadius = size.minDimension * 0.48f
+        val centerOffset = Offset(size.width / 2f, size.height / 2f)
+
+        listOf(0.36f, 0.68f, 1f).forEach { fraction ->
+          drawCircle(
+            color = gridRingColor,
+            radius = maxRadius * fraction,
+            center = centerOffset,
+            style = Stroke(width = 1.dp.toPx()),
+          )
+        }
+
+        drawLine(
+          color = crosshairColor,
+          start = Offset(centerOffset.x - maxRadius, centerOffset.y),
+          end = Offset(centerOffset.x + maxRadius, centerOffset.y),
+          strokeWidth = 0.8.dp.toPx(),
+        )
+        drawLine(
+          color = crosshairColor,
+          start = Offset(centerOffset.x, centerOffset.y - maxRadius),
+          end = Offset(centerOffset.x, centerOffset.y + maxRadius),
+          strokeWidth = 0.8.dp.toPx(),
+        )
+
+        drawCircle(
+          color = coreColor,
+          radius = maxRadius * 0.36f,
+          center = centerOffset,
+        )
+        drawCircle(
+          color = primaryColor.copy(alpha = 0.25f),
+          radius = maxRadius * 0.36f,
+          center = centerOffset,
+          style = Stroke(width = 1.dp.toPx()),
+        )
+      }
+    }
+
+    Icon(
+      imageVector = Icons.Rounded.WifiFind,
+      contentDescription = null,
+      tint = primaryColor,
+      modifier = Modifier.size(20.dp),
+    )
+  }
+}
+
+@Composable
+private fun ActiveRadarAnimatedCanvas(
+  primaryColor: Color,
+  crosshairColor: Color,
+  coreColor: Color,
+  modifier: Modifier = Modifier,
+) {
   val transition = rememberInfiniteTransition(label = "wifi_radar_scope")
   val sweepAngle by
     transition.animateFloat(
@@ -641,94 +709,75 @@ private fun RadarScannerScope(
       label = "radar_pulse_two",
     )
 
-  Box(
-    modifier = modifier,
-    contentAlignment = Alignment.Center,
-  ) {
-    Canvas(modifier = Modifier.fillMaxSize()) {
-      val maxRadius = size.minDimension * 0.48f
-      val centerOffset = Offset(size.width / 2f, size.height / 2f)
+  Canvas(modifier = modifier) {
+    val maxRadius = size.minDimension * 0.48f
+    val centerOffset = Offset(size.width / 2f, size.height / 2f)
 
-      // Subtle concentric radar range rings
-      listOf(0.36f, 0.68f, 1f).forEach { fraction ->
-        drawCircle(
-          color = if (isScanning) primaryColor.copy(alpha = 0.16f) else gridRingColor,
-          radius = maxRadius * fraction,
-          center = centerOffset,
-          style = Stroke(width = 1.dp.toPx()),
-        )
-      }
-
-      // Faint cardinal crosshairs
-      drawLine(
-        color = crosshairColor,
-        start = Offset(centerOffset.x - maxRadius, centerOffset.y),
-        end = Offset(centerOffset.x + maxRadius, centerOffset.y),
-        strokeWidth = 0.8.dp.toPx(),
-      )
-      drawLine(
-        color = crosshairColor,
-        start = Offset(centerOffset.x, centerOffset.y - maxRadius),
-        end = Offset(centerOffset.x, centerOffset.y + maxRadius),
-        strokeWidth = 0.8.dp.toPx(),
-      )
-
-      if (isScanning) {
-        // Rotating conical radar sweep sector
-        rotate(degrees = sweepAngle, pivot = centerOffset) {
-          drawCircle(
-            brush =
-              Brush.sweepGradient(
-                0.0f to Color.Transparent,
-                0.72f to Color.Transparent,
-                0.94f to primaryColor.copy(alpha = 0.14f),
-                1.0f to primaryColor.copy(alpha = 0.30f),
-                center = centerOffset,
-              ),
-            radius = maxRadius,
-            center = centerOffset,
-          )
-          drawLine(
-            color = primaryColor.copy(alpha = 0.55f),
-            start = centerOffset,
-            end = Offset(centerOffset.x + maxRadius, centerOffset.y),
-            strokeWidth = 1.5.dp.toPx(),
-            cap = StrokeCap.Round,
-          )
-        }
-
-        // Staggered sonar ripple rings expanding outward
-        listOf(pulseOne, pulseTwo).forEach { progress ->
-          val rippleRadius = maxRadius * (0.24f + 0.76f * progress)
-          val rippleAlpha = (1f - progress) * 0.42f
-          drawCircle(
-            color = primaryColor.copy(alpha = rippleAlpha),
-            radius = rippleRadius,
-            center = centerOffset,
-            style = Stroke(width = 1.5.dp.toPx()),
-          )
-        }
-      }
-
-      // Center hub backing
+    listOf(0.36f, 0.68f, 1f).forEach { fraction ->
       drawCircle(
-        color = coreColor,
-        radius = maxRadius * 0.36f,
-        center = centerOffset,
-      )
-      drawCircle(
-        color = primaryColor.copy(alpha = if (isScanning) 0.45f else 0.25f),
-        radius = maxRadius * 0.36f,
+        color = primaryColor.copy(alpha = 0.16f),
+        radius = maxRadius * fraction,
         center = centerOffset,
         style = Stroke(width = 1.dp.toPx()),
       )
     }
 
-    Icon(
-      imageVector = Icons.Rounded.WifiFind,
-      contentDescription = null,
-      tint = primaryColor,
-      modifier = Modifier.size(20.dp),
+    drawLine(
+      color = crosshairColor,
+      start = Offset(centerOffset.x - maxRadius, centerOffset.y),
+      end = Offset(centerOffset.x + maxRadius, centerOffset.y),
+      strokeWidth = 0.8.dp.toPx(),
+    )
+    drawLine(
+      color = crosshairColor,
+      start = Offset(centerOffset.x, centerOffset.y - maxRadius),
+      end = Offset(centerOffset.x, centerOffset.y + maxRadius),
+      strokeWidth = 0.8.dp.toPx(),
+    )
+
+    rotate(degrees = sweepAngle, pivot = centerOffset) {
+      drawCircle(
+        brush =
+          Brush.sweepGradient(
+            0.0f to Color.Transparent,
+            0.72f to Color.Transparent,
+            0.94f to primaryColor.copy(alpha = 0.14f),
+            1.0f to primaryColor.copy(alpha = 0.30f),
+            center = centerOffset,
+          ),
+        radius = maxRadius,
+        center = centerOffset,
+      )
+      drawLine(
+        color = primaryColor.copy(alpha = 0.55f),
+        start = centerOffset,
+        end = Offset(centerOffset.x + maxRadius, centerOffset.y),
+        strokeWidth = 1.5.dp.toPx(),
+        cap = StrokeCap.Round,
+      )
+    }
+
+    listOf(pulseOne, pulseTwo).forEach { progress ->
+      val rippleRadius = maxRadius * (0.24f + 0.76f * progress)
+      val rippleAlpha = (1f - progress) * 0.42f
+      drawCircle(
+        color = primaryColor.copy(alpha = rippleAlpha),
+        radius = rippleRadius,
+        center = centerOffset,
+        style = Stroke(width = 1.5.dp.toPx()),
+      )
+    }
+
+    drawCircle(
+      color = coreColor,
+      radius = maxRadius * 0.36f,
+      center = centerOffset,
+    )
+    drawCircle(
+      color = primaryColor.copy(alpha = 0.45f),
+      radius = maxRadius * 0.36f,
+      center = centerOffset,
+      style = Stroke(width = 1.dp.toPx()),
     )
   }
 }
@@ -904,7 +953,9 @@ private fun ConnectionStatusHeroCard(
             )
             Column {
               Text(
-                text = "Connecting to ${status.targetName}...",
+                text =
+                  if (status.isSilentAutoHeal) "Reconnecting to ${status.targetName}..."
+                  else "Connecting to ${status.targetName}...",
                 style = MaterialTheme.typography.titleMedium,
               )
               Text(
@@ -1533,7 +1584,7 @@ fun SettingsModalSheet(
           mutableStateOf(uiState.settings.releaseRepoOverride)
         }
         val repoPlaceholder =
-          BuildConfig.RELEASE_REPO.trim().ifBlank { "e.g. username/yv-tv-remote" }
+          BuildConfig.RELEASE_REPO.trim().ifBlank { "e.g. https://yourview.in/update-manifest.json" }
         Surface(
           color = MaterialTheme.colorScheme.surfaceVariant,
           shape = RoundedCornerShape(18.dp),
@@ -1592,7 +1643,7 @@ fun SettingsModalSheet(
                 repoInput = it
                 onChangeReleaseRepo(it)
               },
-              label = { Text("GitHub Repo (owner/repo)") },
+              label = { Text("Release Source (URL or owner/repo)") },
               placeholder = { Text(repoPlaceholder) },
               singleLine = true,
               modifier = Modifier.fillMaxWidth().testTag("settings_release_repo_input"),
@@ -1785,6 +1836,26 @@ fun SettingsModalSheet(
               }
             }
           }
+        }
+      }
+
+      // Brand Footer (Exclusive YourView / yourview.in attribution)
+      item {
+        Column(
+          modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
+          horizontalAlignment = Alignment.CenterHorizontally,
+          verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+          Text(
+            text = "YV-TV Remote • YourView",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+          Text(
+            text = "yourview.in",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+          )
         }
       }
     }

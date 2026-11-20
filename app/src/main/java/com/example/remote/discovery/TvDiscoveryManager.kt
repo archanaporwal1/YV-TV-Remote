@@ -48,6 +48,9 @@ class TvDiscoveryManager(context: Context) {
   private var resolveWorkerJob: Job? = null
   private var discoveryListener: NsdManager.DiscoveryListener? = null
   private var multicastLock: WifiManager.MulticastLock? = null
+  private val activeInfoCallbacks =
+    java.util.concurrent.ConcurrentHashMap<String, NsdManager.ServiceInfoCallback>()
+  private val callbackExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
   @Synchronized
   fun startScan() {
@@ -58,7 +61,6 @@ class TvDiscoveryManager(context: Context) {
       return
     }
     _scanError.value = null
-    _discoveredTvs.value = emptyList()
 
     acquireMulticastLock()
 
@@ -71,13 +73,7 @@ class TvDiscoveryManager(context: Context) {
         for (serviceInfo in channel) {
           val resolved = resolveSequentially(serviceInfo)
           if (resolved != null) {
-            _discoveredTvs.update { current ->
-              val filtered =
-                current.filterNot {
-                  it.ipAddress == resolved.ipAddress || it.serviceName == resolved.serviceName
-                }
-              (filtered + resolved).sortedBy { it.displayName.lowercase() }
-            }
+            upsertDiscoveredTv(resolved)
           }
         }
       }
@@ -96,7 +92,11 @@ class TvDiscoveryManager(context: Context) {
               name.isNotBlank() &&
               queuedServices.add(name)
             ) {
-              resolveQueueChannel?.trySend(service)
+              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                registerModernServiceInfoCallback(manager, service, name)
+              } else {
+                resolveQueueChannel?.trySend(service)
+              }
             }
           }
         }
@@ -106,6 +106,7 @@ class TvDiscoveryManager(context: Context) {
             val name = service.serviceName.orEmpty()
             if (name.isNotBlank()) {
               queuedServices.remove(name)
+              unregisterModernServiceInfoCallback(manager, name)
               _discoveredTvs.update { current ->
                 current.filterNot { it.serviceName == name }
               }
@@ -152,12 +153,99 @@ class TvDiscoveryManager(context: Context) {
       }
     }
     discoveryListener = null
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+      val manager = nsdManager
+      val snapshot = activeInfoCallbacks.keys.toList()
+      snapshot.forEach { key ->
+        unregisterModernServiceInfoCallback(manager, key)
+      }
+    }
     runCatching { resolveQueueChannel?.close() }
     resolveQueueChannel = null
     resolveWorkerJob?.cancel()
     resolveWorkerJob = null
     releaseMulticastLock()
     _isScanning.value = false
+  }
+
+  private fun upsertDiscoveredTv(resolved: DiscoveredTv) {
+    _discoveredTvs.update { current ->
+      val filtered =
+        current.filterNot {
+          it.ipAddress == resolved.ipAddress || it.serviceName == resolved.serviceName
+        }
+      (filtered + resolved).sortedBy { it.displayName.lowercase() }
+    }
+  }
+
+  private fun registerModernServiceInfoCallback(
+    manager: NsdManager,
+    service: NsdServiceInfo,
+    serviceName: String,
+  ) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
+    val callback =
+      object : NsdManager.ServiceInfoCallback {
+        override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {
+          activeInfoCallbacks.remove(serviceName)
+          resolveQueueChannel?.trySend(service)
+        }
+
+        override fun onServiceUpdated(serviceInfo: NsdServiceInfo) {
+          runCatching {
+            val tv = toDiscoveredTv(serviceInfo)
+            if (tv != null) {
+              upsertDiscoveredTv(tv)
+            }
+          }
+        }
+
+        override fun onServiceLost() {
+          runCatching {
+            _discoveredTvs.update { current ->
+              current.filterNot { it.serviceName == serviceName }
+            }
+          }
+        }
+
+        override fun onServiceInfoCallbackUnregistered() {
+          activeInfoCallbacks.remove(serviceName)
+        }
+      }
+
+    val previous = activeInfoCallbacks.put(serviceName, callback)
+    if (previous != null) {
+      runCatching { manager.unregisterServiceInfoCallback(previous) }
+    }
+    val registered =
+      runCatching {
+        manager.registerServiceInfoCallback(service, callbackExecutor, callback)
+      }
+    if (registered.isFailure) {
+      activeInfoCallbacks.remove(serviceName)
+      resolveQueueChannel?.trySend(service)
+    }
+  }
+
+  private fun unregisterModernServiceInfoCallback(manager: NsdManager?, serviceName: String) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
+    val cb = activeInfoCallbacks.remove(serviceName) ?: return
+    runCatching { manager?.unregisterServiceInfoCallback(cb) }
+  }
+
+  private fun toDiscoveredTv(resolvedService: NsdServiceInfo): DiscoveredTv? {
+    val ipv4Address = extractIpv4Address(resolvedService)
+    if (ipv4Address.isNullOrBlank()) return null
+    val svcName = resolvedService.serviceName.orEmpty()
+    val friendlyName =
+      extractFriendlyName(resolvedService)
+        ?: svcName.ifBlank { "Android TV" }
+    return DiscoveredTv(
+      serviceName = svcName,
+      displayName = friendlyName,
+      ipAddress = ipv4Address,
+      port = resolvedService.port.takeIf { it > 0 } ?: DEFAULT_REMOTE_PORT,
+    )
   }
 
   @Suppress("DEPRECATION")
@@ -179,24 +267,7 @@ class TvDiscoveryManager(context: Context) {
 
                 override fun onServiceResolved(resolvedService: NsdServiceInfo) {
                   if (!completed.compareAndSet(false, true) || !continuation.isActive) return
-                  val tv =
-                    runCatching {
-                      val ipv4Address = extractIpv4Address(resolvedService)
-                      if (ipv4Address.isNullOrBlank()) {
-                        null
-                      } else {
-                        val svcName = resolvedService.serviceName.orEmpty()
-                        val friendlyName =
-                          extractFriendlyName(resolvedService)
-                            ?: svcName.ifBlank { "Android TV" }
-                        DiscoveredTv(
-                          serviceName = svcName,
-                          displayName = friendlyName,
-                          ipAddress = ipv4Address,
-                          port = resolvedService.port.takeIf { it > 0 } ?: DEFAULT_REMOTE_PORT,
-                        )
-                      }
-                    }.getOrNull()
+                  val tv = runCatching { toDiscoveredTv(resolvedService) }.getOrNull()
                   continuation.resume(false to tv)
                 }
               }

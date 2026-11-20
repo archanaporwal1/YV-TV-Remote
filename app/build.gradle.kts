@@ -20,7 +20,7 @@ android {
     (project.findProperty("RELEASE_REPO") as String?)?.trim()?.replace("\"", "").orEmpty()
 
   defaultConfig {
-    applicationId = "com.aistudio.yvtvremote.k8m3qx"
+    applicationId = "in.yourview.yvtvremote"
     minSdk = 24
     targetSdk = 36
     versionCode = ciVersionCode

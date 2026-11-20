@@ -227,4 +227,27 @@ class RemoteProtocolUnitTest {
     val result = runCatching { DelimitedStreamHelper.readDelimitedBytes(badFrame) }
     org.junit.Assert.assertTrue(result.isFailure || result.getOrNull() == null)
   }
+
+  @Test
+  fun featureBitmaskNegotiationIntersectsServerCapabilitiesSafely() {
+    val negotiate = com.example.remote.protocol.RemoteControlClient::negotiateFeatureCode
+    assertEquals(622, negotiate(622))
+    assertEquals(639, negotiate(639))
+    assertEquals(623, negotiate(2671)) // 2671 & 639 == 623 (strips unsupported server bits)
+    assertEquals(622, negotiate(0))    // Fallback when server omits code1
+  }
+
+  @Test
+  fun wifiNetworkBinderDetectsPrivateLanHostsAndSkipsLoopback() {
+    val isLan = com.example.remote.protocol.WifiNetworkBinder::isPrivateLanHost
+    org.junit.Assert.assertTrue(isLan("192.168.1.50"))
+    org.junit.Assert.assertTrue(isLan("10.0.0.12"))
+    org.junit.Assert.assertTrue(isLan("172.16.4.20"))
+    org.junit.Assert.assertTrue(isLan("169.254.10.2"))
+    org.junit.Assert.assertFalse(isLan("127.0.0.1"))
+    org.junit.Assert.assertFalse(isLan("localhost"))
+    org.junit.Assert.assertFalse(isLan("::1"))
+    org.junit.Assert.assertFalse(isLan("8.8.8.8"))
+    org.junit.Assert.assertFalse(isLan("172.32.0.1"))
+  }
 }

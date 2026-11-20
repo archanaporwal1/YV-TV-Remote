@@ -1,5 +1,6 @@
 package com.example.remote.protocol
 
+import android.content.Context
 import android.os.Build
 import com.example.proto.remote.RemoteAppLinkLaunchRequest
 import com.example.proto.remote.RemoteConfigure
@@ -46,6 +47,7 @@ import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLException
 import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLSocket
@@ -67,6 +69,7 @@ enum class OttLaunchOutcome {
 
 class RemoteControlClient(
   private val certificateManager: CertificateManager,
+  private val appContext: Context? = null,
   private val keepaliveIntervalMs: Long = DEFAULT_KEEPALIVE_INTERVAL_MS,
   private val socketReadTimeoutMs: Int = DEFAULT_SOCKET_READ_TIMEOUT_MS,
   private val staleConnectionTimeoutMs: Long = DEFAULT_STALE_CONNECTION_TIMEOUT_MS,
@@ -76,9 +79,20 @@ class RemoteControlClient(
     data object Disconnected : SessionEvent()
     data object Connecting : SessionEvent()
     data object Connected : SessionEvent()
-    data class PairingRequired(val reason: String) : SessionEvent()
-    data class ConnectionLost(val message: String) : SessionEvent()
-    data class Error(val message: String) : SessionEvent()
+    data class PairingRequired(
+      val reason: String,
+      val eventId: Long = nextEventId(),
+    ) : SessionEvent()
+
+    data class ConnectionLost(
+      val message: String,
+      val eventId: Long = nextEventId(),
+    ) : SessionEvent()
+
+    data class Error(
+      val message: String,
+      val eventId: Long = nextEventId(),
+    ) : SessionEvent()
   }
 
   private val _sessionEvent = MutableStateFlow<SessionEvent>(SessionEvent.Disconnected)
@@ -101,6 +115,7 @@ class RemoteControlClient(
   @Volatile private var socket: SSLSocket? = null
   @Volatile private var outputStream: OutputStream? = null
   @Volatile private var lastInboundAtMs: Long = 0L
+  @Volatile private var serverSendsPings: Boolean = false
   @Volatile private var serverAnswersClientPings: Boolean = false
   @Volatile private var activeAppLinkProbe: String? = null
   private val unansweredClientPings = AtomicInteger(0)
@@ -114,6 +129,17 @@ class RemoteControlClient(
       _sessionEvent.value is SessionEvent.Connected
   }
 
+  fun millisSinceLastInbound(): Long {
+    val last = lastInboundAtMs
+    if (last <= 0L) return Long.MAX_VALUE
+    return (System.currentTimeMillis() - last).coerceAtLeast(0L)
+  }
+
+  fun isStale(maxSilenceMs: Long): Boolean {
+    if (!isConnectionHealthy()) return true
+    return millisSinceLastInbound() > maxSilenceMs
+  }
+
   suspend fun connect(host: String, port: Int = DEFAULT_REMOTE_PORT) {
     teardownSessionOnly()
     _sessionEvent.value = SessionEvent.Connecting
@@ -122,20 +148,30 @@ class RemoteControlClient(
 
     val connectSuccess =
       withContext(Dispatchers.IO) {
+        var plainSocket: java.net.Socket? = null
+        var sslSocket: SSLSocket? = null
         try {
           val tls = certificateManager.createTlsSessionContext()
-          val sslSocket =
-            (tls.sslContext.socketFactory.createSocket() as SSLSocket).apply {
+          plainSocket =
+            WifiNetworkBinder.createPlainSocket(appContext, host).apply {
+              keepAlive = true
+              tcpNoDelay = true
+              soTimeout = CONNECT_TIMEOUT_MS
+              connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+            }
+          sslSocket =
+            (tls.sslContext.socketFactory.createSocket(plainSocket, host, port, true) as SSLSocket).apply {
               useClientMode = true
               keepAlive = true
               tcpNoDelay = true
-              soTimeout = socketReadTimeoutMs
-              connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+              soTimeout = HANDSHAKE_TIMEOUT_MS
               startHandshake()
+              soTimeout = socketReadTimeoutMs
             }
           socket = sslSocket
           outputStream = sslSocket.outputStream
           lastInboundAtMs = System.currentTimeMillis()
+          serverSendsPings = false
           serverAnswersClientPings = false
           unansweredClientPings.set(0)
           activeAppLinkProbe = null
@@ -152,14 +188,21 @@ class RemoteControlClient(
             }
           true
         } catch (e: SSLException) {
+          runCatching { sslSocket?.close() }
+          runCatching { plainSocket?.close() }
           _sessionEvent.value =
             SessionEvent.PairingRequired(
               "TV requires pairing before remote control access (${e.message ?: "TLS rejected"})."
             )
           false
         } catch (e: kotlinx.coroutines.CancellationException) {
+          runCatching { sslSocket?.close() }
+          runCatching { plainSocket?.close() }
           throw e
         } catch (t: Throwable) {
+          runCatching { sslSocket?.close() }
+          runCatching { plainSocket?.close() }
+          if (t is VirtualMachineError) throw t
           _sessionEvent.value =
             SessionEvent.Error(t.message ?: "Unable to connect to $host:$port.")
           false
@@ -178,6 +221,27 @@ class RemoteControlClient(
       if (_sessionEvent.value !is SessionEvent.Connected) continue
 
       val silentMs = System.currentTimeMillis() - lastInboundAtMs
+
+      // Real Android TV Remote v2 servers send RemotePingRequest every ~5s.
+      // When the server drives heartbeats, never spam unsolicited client pings;
+      // only fail if the server goes completely silent past the stale timeout.
+      if (serverSendsPings) {
+        if (silentMs >= staleConnectionTimeoutMs) {
+          if (sessionScope.isActive && socket === sslSocket) {
+            _sessionEvent.value =
+              SessionEvent.ConnectionLost("TV heartbeat timed out after ${silentMs}ms of silence.")
+            cleanupSocketOnly(expectedSocket = sslSocket)
+          }
+          break
+        }
+        continue
+      }
+
+      // Fallback for servers that do not send server-initiated pings:
+      // only probe when the socket has been silent for at least one keepalive interval.
+      if (silentMs < keepaliveIntervalMs) {
+        continue
+      }
       if (
         serverAnswersClientPings &&
         unansweredClientPings.get() >= MIN_UNANSWERED_PINGS_FOR_STALE &&
@@ -215,6 +279,7 @@ class RemoteControlClient(
     var hasReceivedMessage = false
     var sentConfigureReply = false
     var repliedToServerSetActive = false
+    var negotiatedFeatures = DEFAULT_FEATURE_CODE
     try {
       while (sessionScope.isActive && !sslSocket.isClosed && socket === sslSocket) {
         val frameBytes =
@@ -224,15 +289,21 @@ class RemoteControlClient(
             if (!sessionScope.isActive || sslSocket.isClosed || socket !== sslSocket) break
             if (_sessionEvent.value is SessionEvent.Connected) {
               val silentMs = System.currentTimeMillis() - lastInboundAtMs
-              if (
-                serverAnswersClientPings &&
-                unansweredClientPings.get() >= MIN_UNANSWERED_PINGS_FOR_STALE &&
-                silentMs >= staleConnectionTimeoutMs
-              ) {
-                throw IOException("TV connection timed out after ${silentMs}ms without heartbeat.")
-              }
-              if (!sendKeepalivePing(sslSocket)) {
-                break
+              if (serverSendsPings) {
+                if (silentMs >= staleConnectionTimeoutMs) {
+                  throw IOException("TV heartbeat timed out after ${silentMs}ms of silence.")
+                }
+              } else {
+                if (
+                  serverAnswersClientPings &&
+                  unansweredClientPings.get() >= MIN_UNANSWERED_PINGS_FOR_STALE &&
+                  silentMs >= staleConnectionTimeoutMs
+                ) {
+                  throw IOException("TV connection timed out after ${silentMs}ms without heartbeat.")
+                }
+                if (silentMs >= keepaliveIntervalMs && !sendKeepalivePing(sslSocket)) {
+                  break
+                }
               }
             }
             continue
@@ -245,24 +316,29 @@ class RemoteControlClient(
 
         when {
           message.hasRemoteConfigure() -> {
+            negotiatedFeatures = negotiateFeatureCode(message.remoteConfigure.code1)
             if (!sentConfigureReply) {
               sentConfigureReply = true
-              sendConfigureReply()
+              sendConfigureReply(negotiatedFeatures, sslSocket)
             }
             if (_sessionEvent.value != SessionEvent.Connected) {
               _sessionEvent.value = SessionEvent.Connected
             }
           }
           message.hasRemoteSetActive() -> {
+            val serverActive = message.remoteSetActive.active
+            val negotiatedActive =
+              if (serverActive > 0) negotiateFeatureCode(serverActive) else negotiatedFeatures
             if (!repliedToServerSetActive) {
               repliedToServerSetActive = true
-              sendSetActiveReply()
+              sendSetActiveReply(negotiatedActive, sslSocket)
             }
             if (_sessionEvent.value != SessionEvent.Connected) {
               _sessionEvent.value = SessionEvent.Connected
             }
           }
           message.hasRemotePingRequest() -> {
+            serverSendsPings = true
             val pingVal = message.remotePingRequest.val1
             val pong =
               RemoteMessage.newBuilder()
@@ -387,7 +463,7 @@ class RemoteControlClient(
     }
   }
 
-  private suspend fun sendConfigureReply() {
+  private suspend fun sendConfigureReply(featureCode: Int, targetSocket: SSLSocket) {
     val modelName = Build.MODEL.orEmpty().ifBlank { "Android" }
     val vendorName = Build.MANUFACTURER.orEmpty().ifBlank { "Android" }
     val deviceInfo =
@@ -396,7 +472,7 @@ class RemoteControlClient(
         .setVendor(vendorName)
         .setUnknown1(1)
         .setUnknown2("1")
-        .setPackageName("com.example.yvtvremote")
+        .setPackageName("in.yourview.yvtvremote")
         .setAppVersion("1.0")
         .build()
 
@@ -404,24 +480,24 @@ class RemoteControlClient(
       RemoteMessage.newBuilder()
         .setRemoteConfigure(
           RemoteConfigure.newBuilder()
-            .setCode1(FEATURE_CODE_FULL)
+            .setCode1(featureCode)
             .setDeviceInfo(deviceInfo)
             .build()
         )
         .build()
-    sendRemoteMessage(configureReply)
+    sendRemoteMessage(configureReply, expectedSocket = targetSocket)
   }
 
-  private suspend fun sendSetActiveReply() {
+  private suspend fun sendSetActiveReply(activeFeatures: Int, targetSocket: SSLSocket) {
     val setActiveReply =
       RemoteMessage.newBuilder()
         .setRemoteSetActive(
           RemoteSetActive.newBuilder()
-            .setActive(FEATURE_CODE_FULL)
+            .setActive(activeFeatures)
             .build()
         )
         .build()
-    sendRemoteMessage(setActiveReply)
+    sendRemoteMessage(setActiveReply, expectedSocket = targetSocket)
   }
 
   suspend fun sendKey(
@@ -663,12 +739,23 @@ class RemoteControlClient(
   companion object {
     const val DEFAULT_REMOTE_PORT = 6466
     const val NATIVE_LAUNCH_ERROR_WAIT_MS = 420L
-    const val DEFAULT_KEEPALIVE_INTERVAL_MS = 12_000L
+    const val DEFAULT_KEEPALIVE_INTERVAL_MS = 25_000L
     const val DEFAULT_SOCKET_READ_TIMEOUT_MS = 30_000
-    const val DEFAULT_STALE_CONNECTION_TIMEOUT_MS = 60_000L
+    const val DEFAULT_STALE_CONNECTION_TIMEOUT_MS = 45_000L
     private const val MIN_UNANSWERED_PINGS_FOR_STALE = 2
-    private const val FEATURE_CODE_FULL = 639
+    const val DEFAULT_FEATURE_CODE = 622
+    const val FEATURE_CODE_FULL = 639
     private const val CONNECT_TIMEOUT_MS = 8_000
+    private const val HANDSHAKE_TIMEOUT_MS = 10_000
+    private val eventSequence = AtomicLong(1L)
+
+    private fun nextEventId(): Long = eventSequence.getAndIncrement()
+
+    fun negotiateFeatureCode(serverFeatureCode: Int): Int {
+      if (serverFeatureCode <= 0) return DEFAULT_FEATURE_CODE
+      val intersection = serverFeatureCode and FEATURE_CODE_FULL
+      return if (intersection > 0) intersection else DEFAULT_FEATURE_CODE
+    }
 
     fun isCertificateOrHandshakeError(error: SSLException): Boolean {
       if (error is SSLHandshakeException) return true

@@ -62,7 +62,7 @@ object AppUpdateManager {
         } else {
           val cleanRepo = source.trim('/').removePrefix("https://github.com/").removePrefix("http://github.com/")
           if (!cleanRepo.contains('/')) {
-            return@withContext UpdateCheckResult.Error("Invalid GitHub repository format. Use owner/repo.")
+            return@withContext UpdateCheckResult.Error("Invalid release source format. Use owner/repo or a manifest URL.")
           }
           fetchLatestFromGitHub(cleanRepo)
         }

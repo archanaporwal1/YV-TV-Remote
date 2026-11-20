@@ -58,7 +58,7 @@ class CertificateManager(context: Context) {
     val notAfter = Date(now + 20L * 365L * 86_400_000L) // 20 years validity
     val serial = BigInteger(64, SecureRandom()).abs().max(BigInteger.ONE)
 
-    val subject = X500Name("CN=YV-TV Remote, O=AndroidTV, C=US")
+    val subject = X500Name("CN=YV-TV Remote, O=YourView, OU=yourview.in")
     val certBuilder =
       JcaX509v3CertificateBuilder(
         subject,

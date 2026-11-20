@@ -944,6 +944,39 @@ private fun RemoteDiagnosticBanner(
 }
 
 @Composable
+private fun TelemetryStatusDot(
+  isConnected: Boolean,
+  dotColor: androidx.compose.ui.graphics.Color,
+) {
+  if (isConnected) {
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    val pulseAlpha by
+      infiniteTransition.animateFloat(
+        initialValue = 0.45f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label = "pulse_alpha",
+      )
+    Box(
+      modifier =
+        Modifier
+          .size(10.dp)
+          .alpha(pulseAlpha)
+          .clip(CircleShape)
+          .background(dotColor),
+    )
+  } else {
+    Box(
+      modifier =
+        Modifier
+          .size(10.dp)
+          .clip(CircleShape)
+          .background(dotColor),
+    )
+  }
+}
+
+@Composable
 private fun RemoteTopTelemetryBar(
   status: ConnectionStatus,
   activeProfileName: String,
@@ -952,21 +985,16 @@ private fun RemoteTopTelemetryBar(
   onOpenSettings: () -> Unit,
   onPowerClick: () -> Unit,
 ) {
-  val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-  val pulseAlpha by
-    infiniteTransition.animateFloat(
-      initialValue = 0.45f,
-      targetValue = 1f,
-      animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
-      label = "pulse_alpha",
-    )
-
   val (title, subtitle, dotColor) =
     when (status) {
       is ConnectionStatus.Connected ->
         Triple(status.displayName, "${status.ipAddress}:${status.port} • $activeProfileName", MaterialTheme.colorScheme.tertiary)
       is ConnectionStatus.Connecting ->
-        Triple("Connecting...", "${status.targetName} (${status.ipAddress})", AmberStatus)
+        Triple(
+          if (status.isSilentAutoHeal) "Reconnecting..." else "Connecting...",
+          "${status.targetName} (${status.ipAddress})",
+          AmberStatus,
+        )
       is ConnectionStatus.Pairing ->
         Triple("Pairing...", status.serverName, AmberStatus)
       is ConnectionStatus.Error ->
@@ -996,13 +1024,9 @@ private fun RemoteTopTelemetryBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
       ) {
-        Box(
-          modifier =
-            Modifier
-              .size(10.dp)
-              .alpha(if (status is ConnectionStatus.Connected) pulseAlpha else 1f)
-              .clip(CircleShape)
-              .background(dotColor),
+        TelemetryStatusDot(
+          isConnected = status is ConnectionStatus.Connected,
+          dotColor = dotColor,
         )
         Column(modifier = Modifier.weight(1f)) {
           Text(

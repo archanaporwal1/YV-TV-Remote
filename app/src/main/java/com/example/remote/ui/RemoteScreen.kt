@@ -518,7 +518,8 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
     val editing = customOttToEdit
     AddOrEditOttShortcutDialog(
       editingShortcut = editing,
-      alreadyAddedIds = uiState.uiPreferences.customShortcuts.map { it.id }.toSet(),
+      alreadyAddedIds = uiState.uiPreferences.enabledShortcutIds,
+      detectedOnTvShortcuts = uiState.detectedTvShortcuts,
       onQuickAddPopular = { preset ->
         viewModel.addPopularOttShortcut(preset)
         showAddOttDialog = false
@@ -786,6 +787,7 @@ fun RemoteControlScreen(
                   shortcuts = filteredShortcuts,
                   columns = uiPrefs.shortcutColumns,
                   compact = compact,
+                  verifiedOnTvIds = uiState.verifiedOnTvShortcutIds,
                   onOpenCustomize = onOpenCustomizeUi,
                   onAddOttApp = onOpenAddOttDialog,
                 )
@@ -855,6 +857,7 @@ fun RemoteControlScreen(
                 shortcuts = filteredShortcuts,
                 columns = uiPrefs.shortcutColumns,
                 compact = compact,
+                verifiedOnTvIds = uiState.verifiedOnTvShortcutIds,
                 onOpenCustomize = onOpenCustomizeUi,
                 onAddOttApp = onOpenAddOttDialog,
               )

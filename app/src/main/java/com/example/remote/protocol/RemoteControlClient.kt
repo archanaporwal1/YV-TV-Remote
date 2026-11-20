@@ -58,7 +58,13 @@ data class TvImeState(
   val currentText: String = "",
   val fieldLabel: String = "",
   val appLabel: String = "",
+  val appPackage: String = "",
   val isImeRequested: Boolean = false,
+)
+
+data class DetectedTvAppSignal(
+  val packageName: String,
+  val label: String,
 )
 
 enum class OttLaunchOutcome {
@@ -106,6 +112,9 @@ class RemoteControlClient(
 
   private val _voiceSessionRequest = MutableStateFlow<Int?>(null)
   val voiceSessionRequest: StateFlow<Int?> = _voiceSessionRequest.asStateFlow()
+
+  private val _detectedTvApp = MutableSharedFlow<DetectedTvAppSignal>(extraBufferCapacity = 16)
+  val detectedTvApp: SharedFlow<DetectedTvAppSignal> = _detectedTvApp.asSharedFlow()
 
   private val writeMutex = Mutex()
   private val appLinkLaunchMutex = Mutex()
@@ -357,14 +366,20 @@ class RemoteControlClient(
           message.hasRemoteImeKeyInject() -> {
             val imeInject = message.remoteImeKeyInject
             val status = imeInject.textFieldStatus
+            val appPkg = imeInject.appInfo.appPackage.trim()
+            val appLbl = imeInject.appInfo.label.trim()
             _imeState.update { current ->
               current.copy(
                 imeCounter = imeInject.appInfo.counter,
                 fieldCounter = status.counterField,
                 currentText = status.value,
                 fieldLabel = status.label.ifBlank { current.fieldLabel },
-                appLabel = imeInject.appInfo.label.ifBlank { current.appLabel },
+                appLabel = appLbl.ifBlank { current.appLabel },
+                appPackage = appPkg.ifBlank { current.appPackage },
               )
+            }
+            if (appPkg.isNotEmpty()) {
+              _detectedTvApp.tryEmit(DetectedTvAppSignal(packageName = appPkg, label = appLbl))
             }
           }
           message.hasRemoteImeShowRequest() -> {

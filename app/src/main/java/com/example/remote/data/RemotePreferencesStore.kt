@@ -62,6 +62,7 @@ data class RemoteUiPreferences(
   val showVolumeAndChannel: Boolean = true,
   val showMediaTransport: Boolean = true,
   val showStreamingShortcuts: Boolean = true,
+  val autoSyncTvApps: Boolean = true,
   val shortcutColumns: Int = 3,
   val enabledShortcutIds: Set<String> = TvAppShortcuts.defaultEnabledIds,
   val customShortcuts: List<TvAppShortcut> = emptyList(),
@@ -371,6 +372,7 @@ class RemotePreferencesStore(context: Context) {
         showVolumeAndChannel = obj.optBoolean("showVolumeAndChannel", true),
         showMediaTransport = obj.optBoolean("showMediaTransport", true),
         showStreamingShortcuts = obj.optBoolean("showStreamingShortcuts", true),
+        autoSyncTvApps = obj.optBoolean("autoSyncTvApps", true),
         shortcutColumns = obj.optInt("shortcutColumns", 3).coerceIn(2, 4),
         enabledShortcutIds = enabledIds,
         customShortcuts = customShortcuts,
@@ -392,6 +394,7 @@ class RemotePreferencesStore(context: Context) {
         put("showVolumeAndChannel", uiPrefs.showVolumeAndChannel)
         put("showMediaTransport", uiPrefs.showMediaTransport)
         put("showStreamingShortcuts", uiPrefs.showStreamingShortcuts)
+        put("autoSyncTvApps", uiPrefs.autoSyncTvApps)
         put("shortcutColumns", uiPrefs.shortcutColumns.coerceIn(2, 4))
         val idsArray = JSONArray()
         uiPrefs.enabledShortcutIds.forEach { idsArray.put(it) }
@@ -424,6 +427,54 @@ class RemotePreferencesStore(context: Context) {
     prefs.edit().putString(KEY_UI_PREFERENCES_JSON, obj.toString()).apply()
   }
 
+  fun loadDetectedTvApps(): List<DetectedTvApp> {
+    val raw = prefs.getString(KEY_DETECTED_TV_APPS_JSON, null) ?: return emptyList()
+    return try {
+      val array = JSONArray(raw)
+      buildList {
+        for (i in 0 until array.length()) {
+          val obj = array.optJSONObject(i) ?: continue
+          val tvKey = obj.optString("tvKey").trim()
+          val pkg = obj.optString("packageName").trim()
+          if (tvKey.isNotEmpty() && pkg.isNotEmpty()) {
+            add(
+              DetectedTvApp(
+                tvKey = tvKey,
+                packageName = pkg,
+                label = obj.optString("label", "").trim(),
+                lastSeenAt = obj.optLong("lastSeenAt", System.currentTimeMillis()),
+              )
+            )
+          }
+        }
+      }
+    } catch (_: Exception) {
+      emptyList()
+    }
+  }
+
+  fun saveDetectedTvApps(apps: List<DetectedTvApp>) {
+    val array = JSONArray()
+    apps.forEach { app ->
+      array.put(
+        JSONObject().apply {
+          put("tvKey", app.tvKey)
+          put("packageName", app.packageName)
+          put("label", app.label)
+          put("lastSeenAt", app.lastSeenAt)
+        }
+      )
+    }
+    prefs.edit().putString(KEY_DETECTED_TV_APPS_JSON, array.toString()).apply()
+  }
+
+  fun loadDismissedAutoSyncIds(): Set<String> =
+    prefs.getStringSet(KEY_DISMISSED_AUTO_SYNC_IDS, emptySet())?.toSet().orEmpty()
+
+  fun saveDismissedAutoSyncIds(ids: Set<String>) {
+    prefs.edit().putStringSet(KEY_DISMISSED_AUTO_SYNC_IDS, ids.toSet()).apply()
+  }
+
   companion object {
     private const val PREFS_NAME = "yvtv_remote_prefs"
     private const val KEY_PROFILES = "user_profiles_json"
@@ -439,6 +490,8 @@ class RemotePreferencesStore(context: Context) {
     private const val KEY_SKIPPED_UPDATE_TAG = "skipped_update_tag"
     private const val KEY_LAST_NOTIFIED_UPDATE_TAG = "last_notified_update_tag"
     private const val KEY_UI_PREFERENCES_JSON = "ui_preferences_json"
+    private const val KEY_DETECTED_TV_APPS_JSON = "detected_tv_apps_json"
+    private const val KEY_DISMISSED_AUTO_SYNC_IDS = "dismissed_auto_sync_ids"
     const val DEFAULT_PROFILE_ID = "profile_living_room"
   }
 }

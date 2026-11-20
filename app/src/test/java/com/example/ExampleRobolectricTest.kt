@@ -7,6 +7,7 @@ import com.example.remote.data.RemotePreferencesStore
 import com.example.remote.data.UserProfile
 import com.example.remote.protocol.CertificateManager
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -1767,4 +1768,177 @@ class ExampleRobolectricTest {
     org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
     serverThread.join(1_500L)
   }
+
+  @Test
+  fun `OttBrandResolver resolves all default and Indian plus global catalog OTT apps and auto-matches custom entries`() {
+    val allCatalogShortcuts =
+      com.example.remote.data.TvAppShortcuts.all + com.example.remote.data.TvAppShortcuts.popularAddableCatalog
+
+    // All 9 default apps + all 22 catalog apps must resolve to a known official brand key
+    assertEquals(9, com.example.remote.data.TvAppShortcuts.all.size)
+    assertTrue(com.example.remote.data.TvAppShortcuts.popularAddableCatalog.size >= 22)
+
+    allCatalogShortcuts.forEach { shortcut ->
+      val resolved = com.example.remote.data.OttBrandResolver.resolveBrandKey(shortcut)
+      assertTrue(
+        "Expected official brand key for ${shortcut.name} (${shortcut.id}), got null",
+        resolved != null && resolved in com.example.remote.data.OttBrandResolver.allKnownBrandKeys,
+      )
+      val plan = com.example.remote.data.TvAppShortcuts.buildLaunchPlan(shortcut)
+      assertTrue("Expected native launch candidates for ${shortcut.name}", plan.nativeCandidates.isNotEmpty())
+      assertTrue(
+        "Expected market://launch for ${shortcut.name}",
+        plan.nativeCandidates.any { it.startsWith("market://launch?id=${shortcut.packageNames.first()}") },
+      )
+    }
+
+    // Updated JioHotstar default keeps backward-compatible id="hotstar"
+    val hotstar = com.example.remote.data.TvAppShortcuts.all.first { it.id == "hotstar" }
+    assertEquals("JioHotstar", hotstar.name)
+    assertEquals("hotstar", com.example.remote.data.OttBrandResolver.resolveBrandKey(hotstar))
+
+    // Auto-match by URL domain for custom shortcuts
+    assertEquals(
+      "hotstar",
+      com.example.remote.data.OttBrandResolver.resolveBrandKey(
+        id = "custom_1",
+        appLink = "https://www.jiohotstar.com/in",
+        name = "My Cricket App",
+      ),
+    )
+    assertEquals(
+      "airtel_xstream",
+      com.example.remote.data.OttBrandResolver.resolveBrandKey(
+        id = "custom_2",
+        appLink = "https://airtelxstream.in",
+        name = "Custom Stream",
+      ),
+    )
+    assertEquals(
+      "tata_play_binge",
+      com.example.remote.data.OttBrandResolver.resolveBrandKey(
+        id = "custom_3",
+        appLink = "https://www.tataskybinge.com",
+        name = "Binge Box",
+      ),
+    )
+
+    // Auto-match by Android TV package ID (explicit list and market://details link)
+    assertEquals(
+      "sonyliv",
+      com.example.remote.data.OttBrandResolver.resolveBrandKey(
+        id = "custom_4",
+        packageNames = listOf("com.sonyliv"),
+        name = "Sports TV",
+      ),
+    )
+    assertEquals(
+      "tata_play_binge",
+      com.example.remote.data.OttBrandResolver.resolveBrandKey(
+        id = "custom_5",
+        appLink = "market://details?id=com.tatasky.binge",
+        name = "Binge",
+      ),
+    )
+
+    // Auto-match by normalized display name aliases
+    assertEquals(
+      "hotstar",
+      com.example.remote.data.OttBrandResolver.resolveBrandKey(id = "custom_6", name = "Disney+ Hotstar"),
+    )
+    assertEquals(
+      "prime_video",
+      com.example.remote.data.OttBrandResolver.resolveBrandKey(id = "custom_7", name = "Amazon Prime Video"),
+    )
+    assertEquals(
+      "max",
+      com.example.remote.data.OttBrandResolver.resolveBrandKey(id = "custom_8", name = "HBO Max"),
+    )
+    assertEquals(
+      "manoramamax",
+      com.example.remote.data.OttBrandResolver.resolveBrandKey(id = "custom_9", name = "Manorama Max"),
+    )
+
+    // Unknown custom app gracefully falls back to null (uses custom monogram/symbol)
+    assertEquals(
+      null,
+      com.example.remote.data.OttBrandResolver.resolveBrandKey(
+        id = "custom_local_media",
+        appLink = "https://my-local-cinema.example",
+        packageNames = listOf("com.example.unknownplayer"),
+        name = "Living Room Cinema",
+      ),
+    )
+  }
+
+  @Test
+  fun `VoiceCommandParser resolves JioHotstar and expanded Indian OTT commands`() {
+    val jioHotstarCmd = com.example.remote.voice.VoiceCommandParser.parse("open jiohotstar")
+    assertTrue(jioHotstarCmd is com.example.remote.voice.ParsedVoiceCommand.OpenOttApp)
+    assertEquals("hotstar", (jioHotstarCmd as com.example.remote.voice.ParsedVoiceCommand.OpenOttApp).shortcut.id)
+
+    val legacyHotstarCmd = com.example.remote.voice.VoiceCommandParser.parse("open disney+ hotstar")
+    assertTrue(legacyHotstarCmd is com.example.remote.voice.ParsedVoiceCommand.OpenOttApp)
+    assertEquals("hotstar", (legacyHotstarCmd as com.example.remote.voice.ParsedVoiceCommand.OpenOttApp).shortcut.id)
+
+    val airtelCmd = com.example.remote.voice.VoiceCommandParser.parse("launch airtel xstream")
+    assertTrue(airtelCmd is com.example.remote.voice.ParsedVoiceCommand.OpenOttApp)
+    assertEquals("airtel_xstream", (airtelCmd as com.example.remote.voice.ParsedVoiceCommand.OpenOttApp).shortcut.id)
+
+    val tataBingeCmd = com.example.remote.voice.VoiceCommandParser.parse("open tata play binge")
+    assertTrue(tataBingeCmd is com.example.remote.voice.ParsedVoiceCommand.OpenOttApp)
+    assertEquals("tata_play_binge", (tataBingeCmd as com.example.remote.voice.ParsedVoiceCommand.OpenOttApp).shortcut.id)
+  }
+
+  @Test
+  fun `zero-setup TV app auto-sync filters system apps, promotes known OTT brands, and respects user removal`() {
+    // System / launcher / keyboard packages must never pollute the remote
+    assertFalse(com.example.remote.data.TvDetectedAppSync.isSyncableUserApp("com.google.android.tvlauncher"))
+    assertFalse(com.example.remote.data.TvDetectedAppSync.isSyncableUserApp("com.google.android.apps.tv.launcherx"))
+    assertFalse(com.example.remote.data.TvDetectedAppSync.isSyncableUserApp("com.android.tv.settings"))
+    assertFalse(com.example.remote.data.TvDetectedAppSync.isSyncableUserApp("com.google.android.inputmethod.latin"))
+    assertFalse(com.example.remote.data.TvDetectedAppSync.isSyncableUserApp("com.google.android.katniss"))
+
+    // Known OTT packages and third-party TV apps must be allowed
+    assertTrue(com.example.remote.data.TvDetectedAppSync.isSyncableUserApp("com.google.android.youtube.tv"))
+    assertTrue(com.example.remote.data.TvDetectedAppSync.isSyncableUserApp("tv.accedo.airtel.wynk"))
+    assertTrue(com.example.remote.data.TvDetectedAppSync.isSyncableUserApp("org.videolan.vlc"))
+
+    // Catalog promotion: Airtel Xstream package becomes full official preset
+    val airtel = com.example.remote.data.TvDetectedAppSync.toShortcut("tv.accedo.airtel.wynk", "Airtel Xstream")
+    assertEquals("airtel_xstream", airtel.id)
+    assertEquals("Airtel Xstream", airtel.name)
+    assertEquals("airtel_xstream", com.example.remote.data.OttBrandResolver.resolveBrandKey(airtel))
+
+    // Unknown third-party TV app gets clean launchable shortcut
+    val vlc = com.example.remote.data.TvDetectedAppSync.toShortcut("org.videolan.vlc", "VLC")
+    assertEquals("VLC", vlc.name)
+    assertEquals("market://details?id=org.videolan.vlc", vlc.appLink)
+    assertEquals(listOf("org.videolan.vlc"), vlc.packageNames)
+
+    // End-to-end ViewModel zero-setup auto-sync & dismissal respect
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val viewModel = com.example.remote.ui.RemoteViewModel(app)
+
+    // Detecting Airtel Xstream on TV automatically adds it and marks it verified on TV
+    viewModel.handleDetectedTvApp("tv.accedo.airtel.wynk", "Airtel Xstream", tvKeyOverride = "192.168.1.50")
+    assertTrue(viewModel.uiState.value.uiPreferences.enabledShortcutIds.contains("airtel_xstream"))
+    assertTrue(viewModel.uiState.value.verifiedOnTvShortcutIds.contains("airtel_xstream"))
+    assertTrue(viewModel.uiState.value.detectedTvShortcuts.any { it.id == "airtel_xstream" })
+
+    // System launcher event is silently ignored
+    val countBefore = viewModel.uiState.value.detectedTvShortcuts.size
+    viewModel.handleDetectedTvApp("com.google.android.tvlauncher", "Android TV Home", tvKeyOverride = "192.168.1.50")
+    assertEquals(countBefore, viewModel.uiState.value.detectedTvShortcuts.size)
+
+    // If user removes an auto-synced app, re-detecting it must NOT forcefully re-add it
+    viewModel.deleteCustomOttShortcut("airtel_xstream")
+    assertFalse(viewModel.uiState.value.uiPreferences.enabledShortcutIds.contains("airtel_xstream"))
+    viewModel.handleDetectedTvApp("tv.accedo.airtel.wynk", "Airtel Xstream", tvKeyOverride = "192.168.1.50")
+    assertFalse(viewModel.uiState.value.uiPreferences.enabledShortcutIds.contains("airtel_xstream"))
+    // Still remains available in detectedTvShortcuts for 1-tap re-add in Add OTT dialog
+    assertTrue(viewModel.uiState.value.detectedTvShortcuts.any { it.id == "airtel_xstream" })
+  }
 }
+
+

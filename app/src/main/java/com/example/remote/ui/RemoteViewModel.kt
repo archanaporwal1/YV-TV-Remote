@@ -13,12 +13,14 @@ import com.example.proto.remote.RemoteKeyCode
 import androidx.compose.ui.graphics.Color
 import com.example.remote.data.AppSettings
 import com.example.remote.data.CustomOttIconStyle
+import com.example.remote.data.DetectedTvApp
 import com.example.remote.data.PreferredPadMode
 import com.example.remote.data.RemotePreferencesStore
 import com.example.remote.data.RemoteUiPreferences
 import com.example.remote.data.SavedTvConnection
 import com.example.remote.data.TvAppShortcut
 import com.example.remote.data.TvAppShortcuts
+import com.example.remote.data.TvDetectedAppSync
 import com.example.remote.data.UiLayoutPreset
 import com.example.remote.data.UserProfile
 import com.example.ui.theme.AppThemeMode
@@ -139,6 +141,8 @@ data class RemoteUiState(
   val showUpdateDialog: Boolean = false,
   val isCheckingUpdates: Boolean = false,
   val updateStatusMessage: String? = null,
+  val detectedTvShortcuts: List<TvAppShortcut> = emptyList(),
+  val verifiedOnTvShortcutIds: Set<String> = emptySet(),
 )
 
 class RemoteViewModel(application: Application) : AndroidViewModel(application) {
@@ -174,6 +178,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   private var ottLaunchJob: Job? = null
   private var networkCallback: ConnectivityManager.NetworkCallback? = null
   private var hasSeenInitialNetworkCallback = false
+  private var detectedTvAppsCache: List<DetectedTvApp> = emptyList()
+  private var dismissedAutoSyncIds: Set<String> = emptySet()
   private val reconnectMutex = Mutex()
   private val safeCoroutineHandler =
     CoroutineExceptionHandler { _, throwable ->
@@ -205,6 +211,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     observeDiscovery()
     observeRemoteSession()
     observeTvImeState()
+    observeDetectedTvApps()
     observeVoiceSessionRequests()
     registerNetworkCallback()
     attemptAutoReconnectIfEnabled()
@@ -215,6 +222,94 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     viewModelScope.launch(safeCoroutineHandler) {
       remoteClient.imeState.collect { ime ->
         _uiState.update { it.copy(tvImeState = ime) }
+      }
+    }
+  }
+
+  private fun observeDetectedTvApps() {
+    viewModelScope.launch(safeCoroutineHandler) {
+      remoteClient.detectedTvApp.collect { signal ->
+        handleDetectedTvApp(packageName = signal.packageName, label = signal.label)
+      }
+    }
+  }
+
+  private fun activeTvKey(): String {
+    val status = _uiState.value.connectionStatus
+    return when (status) {
+      is ConnectionStatus.Connected -> status.ipAddress.trim().ifEmpty { "default_tv" }
+      else -> lastActiveTarget?.ipAddress?.trim()?.ifEmpty { "default_tv" } ?: "default_tv"
+    }
+  }
+
+  private fun publishDetectedAppsForActiveTv(tvKey: String = activeTvKey()) {
+    val scoped =
+      detectedTvAppsCache
+        .filter { it.tvKey == tvKey }
+        .sortedByDescending { it.lastSeenAt }
+    val shortcuts =
+      scoped
+        .map { TvDetectedAppSync.toShortcut(it.packageName, it.label) }
+        .distinctBy { it.id }
+    val verifiedIds = shortcuts.map { it.id }.toSet()
+    _uiState.update {
+      it.copy(
+        detectedTvShortcuts = shortcuts,
+        verifiedOnTvShortcutIds = verifiedIds,
+      )
+    }
+  }
+
+  internal fun handleDetectedTvApp(
+    packageName: String,
+    label: String,
+    tvKeyOverride: String? = null,
+    allowAutoAdd: Boolean = true,
+  ) {
+    val cleanPkg = packageName.trim()
+    if (!TvDetectedAppSync.isSyncableUserApp(cleanPkg)) return
+
+    val tvKey = tvKeyOverride?.trim()?.ifEmpty { null } ?: activeTvKey()
+    val cleanLabel = label.trim()
+    val now = System.currentTimeMillis()
+    val updatedCache =
+      (detectedTvAppsCache.filterNot {
+        it.tvKey == tvKey && it.packageName.equals(cleanPkg, ignoreCase = true)
+      } + DetectedTvApp(tvKey = tvKey, packageName = cleanPkg, label = cleanLabel, lastSeenAt = now))
+        .sortedByDescending { it.lastSeenAt }
+        .take(64)
+    detectedTvAppsCache = updatedCache
+    prefsStore.saveDetectedTvApps(updatedCache)
+
+    val resolvedShortcut = TvDetectedAppSync.toShortcut(cleanPkg, cleanLabel)
+    val builtInIds = TvAppShortcuts.all.map { it.id }.toSet()
+    val uiPrefs = _uiState.value.uiPreferences
+
+    var autoSyncedNow = false
+    if (
+      allowAutoAdd &&
+      uiPrefs.autoSyncTvApps &&
+      resolvedShortcut.id !in dismissedAutoSyncIds &&
+      resolvedShortcut.id !in uiPrefs.enabledShortcutIds
+    ) {
+      updateUiPreferences { current ->
+        val isBuiltIn = resolvedShortcut.id in builtInIds
+        val alreadyInCustom = current.customShortcuts.any { it.id == resolvedShortcut.id }
+        val nextCustom =
+          if (isBuiltIn || alreadyInCustom) current.customShortcuts
+          else current.customShortcuts + resolvedShortcut.copy(isCustom = true)
+        current.copy(
+          customShortcuts = nextCustom,
+          enabledShortcutIds = current.enabledShortcutIds + resolvedShortcut.id,
+        )
+      }
+      autoSyncedNow = true
+    }
+
+    publishDetectedAppsForActiveTv(tvKey)
+    if (autoSyncedNow) {
+      _uiState.update {
+        it.copy(statusBannerMessage = "Auto-synced ${resolvedShortcut.name} from your TV")
       }
     }
   }
@@ -246,6 +341,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     val saved = prefsStore.loadSavedConnections()
     val settings = prefsStore.loadSettings()
     val uiPrefs = prefsStore.loadUiPreferences()
+    detectedTvAppsCache = prefsStore.loadDetectedTvApps()
+    dismissedAutoSyncIds = prefsStore.loadDismissedAutoSyncIds()
     val initialMode =
       if (uiPrefs.defaultPadMode == PreferredPadMode.TOUCHPAD) RemoteInputMode.TOUCHPAD
       else RemoteInputMode.DPAD
@@ -380,6 +477,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                   statusBannerMessage = null,
                 )
               }
+              publishDetectedAppsForActiveTv(target.ipAddress)
               val (saved, allSaved) =
                 withContext(Dispatchers.IO) {
                   val upserted =
@@ -1437,7 +1535,17 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         }
         val banner =
           when (outcome) {
-            OttLaunchOutcome.LAUNCHED_NATIVE_APP -> "Opening ${shortcut.name} app on TV..."
+            OttLaunchOutcome.LAUNCHED_NATIVE_APP -> {
+              val primaryPkg = shortcut.packageNames.firstOrNull().orEmpty()
+              if (primaryPkg.isNotEmpty()) {
+                handleDetectedTvApp(
+                  packageName = primaryPkg,
+                  label = shortcut.name,
+                  allowAutoAdd = false,
+                )
+              }
+              "Opening ${shortcut.name} app on TV..."
+            }
             OttLaunchOutcome.OPENED_IN_BROWSER -> "${shortcut.name} app not on TV — opening in TV browser..."
             OttLaunchOutcome.FAILED ->
               if (autoReconnectPaused) "Connection paused after repeated drops. Tap Re-pair TV or Retry."
@@ -1860,6 +1968,10 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
   fun toggleShortcutEnabled(shortcutId: String) {
     feedbackManager.trigger(FeedbackCue.NAV_TICK, _uiState.value.settings)
+    val disabling = shortcutId in _uiState.value.uiPreferences.enabledShortcutIds
+    dismissedAutoSyncIds =
+      if (disabling) dismissedAutoSyncIds + shortcutId else dismissedAutoSyncIds - shortcutId
+    prefsStore.saveDismissedAutoSyncIds(dismissedAutoSyncIds)
     updateUiPreferences { current ->
       val nextIds =
         if (shortcutId in current.enabledShortcutIds) {
@@ -1873,6 +1985,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
   fun selectAllShortcuts() {
     feedbackManager.trigger(FeedbackCue.NAV_TICK, _uiState.value.settings)
+    dismissedAutoSyncIds = emptySet()
+    prefsStore.saveDismissedAutoSyncIds(dismissedAutoSyncIds)
     updateUiPreferences { current ->
       current.copy(enabledShortcutIds = current.allAvailableShortcuts().map { it.id }.toSet())
     }
@@ -1880,10 +1994,14 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
   fun addPopularOttShortcut(preset: TvAppShortcut) {
     feedbackManager.trigger(FeedbackCue.CONFIRM_CHIME, _uiState.value.settings)
+    dismissedAutoSyncIds = dismissedAutoSyncIds - preset.id
+    prefsStore.saveDismissedAutoSyncIds(dismissedAutoSyncIds)
+    val builtInIds = TvAppShortcuts.all.map { it.id }.toSet()
     updateUiPreferences { current ->
+      val isBuiltIn = preset.id in builtInIds
       val existing = current.customShortcuts.any { it.id == preset.id }
       val nextCustom =
-        if (existing) current.customShortcuts
+        if (isBuiltIn || existing) current.customShortcuts
         else current.customShortcuts + preset.copy(isCustom = true)
       current.copy(
         customShortcuts = nextCustom,
@@ -1982,6 +2100,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   fun deleteCustomOttShortcut(id: String) {
     feedbackManager.trigger(FeedbackCue.NAV_TICK, _uiState.value.settings)
     val removedName = _uiState.value.uiPreferences.customShortcuts.firstOrNull { it.id == id }?.name
+    dismissedAutoSyncIds = dismissedAutoSyncIds + id
+    prefsStore.saveDismissedAutoSyncIds(dismissedAutoSyncIds)
     updateUiPreferences { current ->
       current.copy(
         customShortcuts = current.customShortcuts.filterNot { it.id == id },

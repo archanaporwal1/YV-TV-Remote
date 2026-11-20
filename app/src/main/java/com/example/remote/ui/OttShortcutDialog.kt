@@ -70,6 +70,7 @@ import com.example.remote.data.TvAppShortcuts
 fun AddOrEditOttShortcutDialog(
   editingShortcut: TvAppShortcut?,
   alreadyAddedIds: Set<String>,
+  detectedOnTvShortcuts: List<TvAppShortcut> = emptyList(),
   onQuickAddPopular: (TvAppShortcut) -> Unit,
   onSaveCustom: (name: String, appLink: String, packageName: String, badge: String, accentColor: Color, iconStyle: CustomOttIconStyle) -> Unit,
   onDismiss: () -> Unit,
@@ -89,6 +90,11 @@ fun AddOrEditOttShortcutDialog(
     mutableStateOf(editingShortcut?.iconStyle ?: CustomOttIconStyle.BADGE)
   }
 
+  val availableDetectedOnTv =
+    remember(detectedOnTvShortcuts, alreadyAddedIds, isEditing) {
+      if (isEditing) emptyList()
+      else detectedOnTvShortcuts.filter { it.id !in alreadyAddedIds }
+    }
   val availablePopular =
     remember(alreadyAddedIds, isEditing) {
       if (isEditing) emptyList()
@@ -113,6 +119,11 @@ fun AddOrEditOttShortcutDialog(
         iconStyle = selectedStyle,
         packageNames = listOfNotNull(packageName.trim().takeIf { it.isNotEmpty() }),
       )
+    }
+  val matchedBrandName =
+    remember(previewShortcut) {
+      com.example.remote.data.OttBrandResolver.resolveBrandKey(previewShortcut)
+        ?.let { com.example.remote.data.OttBrandResolver.displayNameForBrand(it) }
     }
 
   Dialog(
@@ -155,9 +166,16 @@ fun AddOrEditOttShortcutDialog(
                 overflow = TextOverflow.Ellipsis,
               )
               Text(
-                text = if (isEditing) "Update shortcut icon or launch link" else "1-tap popular apps or add any custom OTT",
+                text =
+                  when {
+                    matchedBrandName != null -> "Official $matchedBrandName icon auto-matched"
+                    isEditing -> "Update shortcut icon or launch link"
+                    else -> "1-tap Indian & global apps or add any custom OTT"
+                  },
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color =
+                  if (matchedBrandName != null) MaterialTheme.colorScheme.primary
+                  else MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
               )
@@ -186,51 +204,72 @@ fun AddOrEditOttShortcutDialog(
               .padding(horizontal = 20.dp, vertical = 14.dp),
           verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-          if (availablePopular.isNotEmpty()) {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          if (availableDetectedOnTv.isNotEmpty()) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
               Text(
-                text = "1-TAP POPULAR STREAMING APPS",
+                text = "DETECTED ON YOUR TV",
                 style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
+                color = Color(0xFF10B981),
               )
-              LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(vertical = 2.dp),
-              ) {
-                items(availablePopular, key = { it.id }) { preset ->
-                  Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = RoundedCornerShape(14.dp),
-                    border = BorderStroke(1.dp, preset.accentColor.copy(alpha = 0.45f)),
-                    modifier =
-                      Modifier
-                        .clip(RoundedCornerShape(14.dp))
-                        .clickable { onQuickAddPopular(preset) }
-                        .testTag("quick_add_ott_${preset.id}"),
-                  ) {
-                    Row(
-                      modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                      verticalAlignment = Alignment.CenterVertically,
-                      horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                      OttAppIconTile(
-                        shortcut = preset,
-                        modifier = Modifier.size(28.dp),
-                      )
-                      Text(
-                        text = preset.name,
-                        style = MaterialTheme.typography.labelLarge,
-                        maxLines = 1,
-                        softWrap = false,
-                      )
-                      Icon(
-                        imageVector = Icons.Rounded.Add,
-                        contentDescription = "Add ${preset.name}",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(16.dp),
-                      )
-                    }
-                  }
+              QuickAddOttChipRow(
+                presets = availableDetectedOnTv,
+                rowTag = "quick_add_detected_tv_row",
+                onQuickAddPopular = onQuickAddPopular,
+              )
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+          }
+
+          if (availablePopular.isNotEmpty()) {
+            val indianCatalogIds =
+              remember {
+                setOf(
+                  "airtel_xstream",
+                  "tata_play_binge",
+                  "mx_player",
+                  "aha",
+                  "hoichoi",
+                  "fancode",
+                  "lionsgate_play",
+                  "shemaroome",
+                  "eros_now",
+                  "manoramamax",
+                  "etv_win",
+                  "chaupal",
+                  "stage",
+                  "jiosaavn",
+                )
+              }
+            val availableIndian = remember(availablePopular) { availablePopular.filter { it.id in indianCatalogIds } }
+            val availableGlobal = remember(availablePopular) { availablePopular.filter { it.id !in indianCatalogIds } }
+
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+              if (availableIndian.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                  Text(
+                    text = "1-TAP INDIAN OTT APPS",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                  )
+                  QuickAddOttChipRow(
+                    presets = availableIndian,
+                    rowTag = "quick_add_indian_ott_row",
+                    onQuickAddPopular = onQuickAddPopular,
+                  )
+                }
+              }
+              if (availableGlobal.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                  Text(
+                    text = "1-TAP GLOBAL STREAMING APPS",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                  )
+                  QuickAddOttChipRow(
+                    presets = availableGlobal,
+                    rowTag = "quick_add_global_ott_row",
+                    onQuickAddPopular = onQuickAddPopular,
+                  )
                 }
               }
             }
@@ -452,3 +491,53 @@ fun AddOrEditOttShortcutDialog(
     }
   }
 }
+
+@Composable
+private fun QuickAddOttChipRow(
+  presets: List<TvAppShortcut>,
+  rowTag: String,
+  onQuickAddPopular: (TvAppShortcut) -> Unit,
+) {
+  LazyRow(
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
+    contentPadding = PaddingValues(vertical = 2.dp),
+    modifier = Modifier.testTag(rowTag),
+  ) {
+    items(presets, key = { it.id }) { preset ->
+      Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, preset.accentColor.copy(alpha = 0.45f)),
+        modifier =
+          Modifier
+            .clip(RoundedCornerShape(14.dp))
+            .clickable { onQuickAddPopular(preset) }
+            .testTag("quick_add_ott_${preset.id}"),
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          OttAppIconTile(
+            shortcut = preset,
+            modifier = Modifier.size(28.dp),
+          )
+          Text(
+            text = preset.name,
+            style = MaterialTheme.typography.labelLarge,
+            maxLines = 1,
+            softWrap = false,
+          )
+          Icon(
+            imageVector = Icons.Rounded.Add,
+            contentDescription = "Add ${preset.name}",
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(16.dp),
+          )
+        }
+      }
+    }
+  }
+}
+

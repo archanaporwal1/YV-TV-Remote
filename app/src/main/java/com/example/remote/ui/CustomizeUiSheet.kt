@@ -576,6 +576,34 @@ fun CustomizeUiSheet(
 
               HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
+              Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+              ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                  Text(
+                    text = "Auto-Sync TV Apps",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                  )
+                  Text(
+                    text = "Automatically add apps detected while using your TV (no TV settings needed)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                  )
+                }
+                Switch(
+                  checked = uiPrefs.autoSyncTvApps,
+                  onCheckedChange = { enabled ->
+                    onUpdatePreferences { it.copy(autoSyncTvApps = enabled) }
+                  },
+                  modifier = Modifier.testTag("pref_auto_sync_tv_apps"),
+                )
+              }
+
+              HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
               Text(
                 text = "Tap apps to show or hide them on your remote:",
                 style = MaterialTheme.typography.bodySmall,

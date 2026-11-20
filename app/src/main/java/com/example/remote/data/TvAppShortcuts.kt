@@ -78,7 +78,7 @@ object TvAppShortcuts {
         name = "Prime Video",
         badge = "PV",
         appLink = "https://app.primevideo.com",
-        accentColor = Color(0xFF00A8E1),
+        accentColor = Color(0xFF0578FF),
         packageNames =
           listOf(
             "com.amazon.amazonvideo.livingroom",
@@ -101,10 +101,10 @@ object TvAppShortcuts {
       ),
       TvAppShortcut(
         id = "hotstar",
-        name = "Disney+ Hotstar",
-        badge = "HS",
-        appLink = "https://www.hotstar.com",
-        accentColor = Color(0xFF1F80E0),
+        name = "JioHotstar",
+        badge = "JH",
+        appLink = "https://www.jiohotstar.com",
+        accentColor = Color(0xFFE1007A),
         packageNames =
           listOf(
             "in.startv.hotstar",
@@ -137,7 +137,7 @@ object TvAppShortcuts {
         name = "Sun NXT",
         badge = "SN",
         appLink = "https://www.sunnxt.com",
-        accentColor = Color(0xFFFF7A00),
+        accentColor = Color(0xFFFF5700),
         packageNames = listOf("com.suntv.sunnxt"),
         nativeSchemes = listOf("sunnxt://home", "sunnxt://"),
       ),
@@ -146,7 +146,7 @@ object TvAppShortcuts {
         name = "JioTV",
         badge = "JT",
         appLink = "https://jiotv.com",
-        accentColor = Color(0xFF0A66C2),
+        accentColor = Color(0xFFE60023),
         packageNames =
           listOf(
             "com.jio.media.jiotvplus",
@@ -172,6 +172,218 @@ object TvAppShortcuts {
 
   val popularAddableCatalog: List<TvAppShortcut> =
     listOf(
+      // Popular Indian OTT Platforms
+      TvAppShortcut(
+        id = "airtel_xstream",
+        name = "Airtel Xstream",
+        badge = "AX",
+        appLink = "https://www.airtelxstream.in",
+        accentColor = Color(0xFFE40000),
+        isCustom = true,
+        iconStyle = CustomOttIconStyle.TV,
+        packageNames =
+          listOf(
+            "tv.accedo.airtel.wynk",
+            "com.airtel.tv",
+          ),
+        nativeSchemes = listOf("airtelxstream://"),
+      ),
+      TvAppShortcut(
+        id = "tata_play_binge",
+        name = "Tata Play Binge",
+        badge = "TPB",
+        appLink = "https://www.tataplaybinge.com",
+        accentColor = Color(0xFFD91E7A),
+        isCustom = true,
+        iconStyle = CustomOttIconStyle.TV,
+        packageNames =
+          listOf(
+            "com.tatasky.binge",
+            "com.tataplay.binge",
+          ),
+        nativeSchemes = listOf("tataplaybinge://"),
+      ),
+      TvAppShortcut(
+        id = "mx_player",
+        name = "MX Player",
+        badge = "MX",
+        appLink = "https://www.mxplayer.in",
+        accentColor = Color(0xFF0066FF),
+        isCustom = true,
+        iconStyle = CustomOttIconStyle.PLAY,
+        packageNames =
+          listOf(
+            "com.mxtech.videoplayer.television",
+            "com.mxtech.videoplayer.ad",
+          ),
+        nativeSchemes = listOf("mxplayer://"),
+      ),
+      TvAppShortcut(
+        id = "aha",
+        name = "aha",
+        badge = "AHA",
+        appLink = "https://www.aha.video",
+        accentColor = Color(0xFFFF6D00),
+        isCustom = true,
+        iconStyle = CustomOttIconStyle.MOVIE,
+        packageNames =
+          listOf(
+            "ahaflix.tv",
+            "com.aha.video.telugu",
+          ),
+        nativeSchemes = listOf("aha://"),
+      ),
+      TvAppShortcut(
+        id = "hoichoi",
+        name = "hoichoi",
+        badge = "HC",
+        appLink = "https://www.hoichoi.tv",
+        accentColor = Color(0xFFE50914),
+        isCustom = true,
+        iconStyle = CustomOttIconStyle.MOVIE,
+        packageNames =
+          listOf(
+            "com.viewlift.hoichoi",
+            "com.hoichoi.tv.android",
+          ),
+        nativeSchemes = listOf("hoichoi://"),
+      ),
+      TvAppShortcut(
+        id = "fancode",
+        name = "FanCode",
+        badge = "FC",
+        appLink = "https://www.fancode.com",
+        accentColor = Color(0xFFFF5000),
+        isCustom = true,
+        iconStyle = CustomOttIconStyle.SPORTS,
+        packageNames =
+          listOf(
+            "com.fancode.tv",
+            "com.dream11sportsguru",
+          ),
+        nativeSchemes = listOf("fancode://"),
+      ),
+      TvAppShortcut(
+        id = "lionsgate_play",
+        name = "Lionsgate Play",
+        badge = "LP",
+        appLink = "https://lionsgateplay.com",
+        accentColor = Color(0xFFF5B82E),
+        isCustom = true,
+        iconStyle = CustomOttIconStyle.MOVIE,
+        packageNames =
+          listOf(
+            "com.lionsgateplay.videoapp",
+            "com.lionsgateplay.tv",
+          ),
+        nativeSchemes = listOf("lionsgateplay://"),
+      ),
+      TvAppShortcut(
+        id = "shemaroome",
+        name = "ShemarooMe",
+        badge = "SM",
+        appLink = "https://www.shemaroome.com",
+        accentColor = Color(0xFFFF4136),
+        isCustom = true,
+        iconStyle = CustomOttIconStyle.MOVIE,
+        packageNames =
+          listOf(
+            "com.shemaroo.shemaroome",
+            "com.shemaroo.shemaroometv",
+          ),
+        nativeSchemes = listOf("shemaroome://"),
+      ),
+      TvAppShortcut(
+        id = "eros_now",
+        name = "Eros Now",
+        badge = "EN",
+        appLink = "https://erosnow.com",
+        accentColor = Color(0xFF00A88F),
+        isCustom = true,
+        iconStyle = CustomOttIconStyle.MOVIE,
+        packageNames =
+          listOf(
+            "com.erosnow",
+            "com.erosnow.tv",
+          ),
+        nativeSchemes = listOf("erosnow://"),
+      ),
+      TvAppShortcut(
+        id = "manoramamax",
+        name = "ManoramaMAX",
+        badge = "MM",
+        appLink = "https://www.manoramamax.com",
+        accentColor = Color(0xFFC6182F),
+        isCustom = true,
+        iconStyle = CustomOttIconStyle.TV,
+        packageNames =
+          listOf(
+            "com.mmtv.manoramamax.tv",
+            "com.mmtv.manoramamax",
+          ),
+        nativeSchemes = listOf("manoramamax://"),
+      ),
+      TvAppShortcut(
+        id = "etv_win",
+        name = "ETV Win",
+        badge = "ETV",
+        appLink = "https://www.etvwin.com",
+        accentColor = Color(0xFFFFD000),
+        isCustom = true,
+        iconStyle = CustomOttIconStyle.TV,
+        packageNames =
+          listOf(
+            "com.etvwin.tv",
+            "com.etvwin.android",
+          ),
+        nativeSchemes = listOf("etvwin://"),
+      ),
+      TvAppShortcut(
+        id = "chaupal",
+        name = "Chaupal",
+        badge = "CH",
+        appLink = "https://chaupal.tv",
+        accentColor = Color(0xFFFFB800),
+        isCustom = true,
+        iconStyle = CustomOttIconStyle.MOVIE,
+        packageNames =
+          listOf(
+            "com.chaupal.tv",
+            "com.bosctech.chaupal",
+          ),
+        nativeSchemes = listOf("chaupal://"),
+      ),
+      TvAppShortcut(
+        id = "stage",
+        name = "STAGE",
+        badge = "STG",
+        appLink = "https://www.stage.in",
+        accentColor = Color(0xFFE11D48),
+        isCustom = true,
+        iconStyle = CustomOttIconStyle.MOVIE,
+        packageNames =
+          listOf(
+            "in.stage.tv",
+            "in.stage",
+          ),
+        nativeSchemes = listOf("stage://"),
+      ),
+      TvAppShortcut(
+        id = "jiosaavn",
+        name = "JioSaavn",
+        badge = "JS",
+        appLink = "https://www.jiosaavn.com",
+        accentColor = Color(0xFF2BC5B4),
+        isCustom = true,
+        iconStyle = CustomOttIconStyle.MUSIC,
+        packageNames =
+          listOf(
+            "com.jio.media.jiobeats",
+            "com.jio.media.jiobeats.tv",
+          ),
+        nativeSchemes = listOf("jiosaavn://"),
+      ),
+      // Global Streaming Platforms
       TvAppShortcut(
         id = "apple_tv",
         name = "Apple TV+",
@@ -251,66 +463,6 @@ object TvAppShortcuts {
         nativeSchemes = listOf("discoveryplus://"),
       ),
       TvAppShortcut(
-        id = "fancode",
-        name = "FanCode",
-        badge = "FC",
-        appLink = "https://www.fancode.com",
-        accentColor = Color(0xFFEF4444),
-        isCustom = true,
-        iconStyle = CustomOttIconStyle.SPORTS,
-        packageNames =
-          listOf(
-            "com.fancode.tv",
-            "com.dream11sportsguru",
-          ),
-        nativeSchemes = listOf("fancode://"),
-      ),
-      TvAppShortcut(
-        id = "mx_player",
-        name = "MX Player",
-        badge = "MX",
-        appLink = "https://www.mxplayer.in",
-        accentColor = Color(0xFF2563EB),
-        isCustom = true,
-        iconStyle = CustomOttIconStyle.PLAY,
-        packageNames =
-          listOf(
-            "com.mxtech.videoplayer.television",
-            "com.mxtech.videoplayer.ad",
-          ),
-        nativeSchemes = listOf("mxplayer://"),
-      ),
-      TvAppShortcut(
-        id = "aha",
-        name = "aha",
-        badge = "AHA",
-        appLink = "https://www.aha.video",
-        accentColor = Color(0xFFFF6D00),
-        isCustom = true,
-        iconStyle = CustomOttIconStyle.MOVIE,
-        packageNames =
-          listOf(
-            "ahaflix.tv",
-            "com.aha.video.telugu",
-          ),
-        nativeSchemes = listOf("aha://"),
-      ),
-      TvAppShortcut(
-        id = "hoichoi",
-        name = "hoichoi",
-        badge = "HC",
-        appLink = "https://www.hoichoi.tv",
-        accentColor = Color(0xFFE11D48),
-        isCustom = true,
-        iconStyle = CustomOttIconStyle.MOVIE,
-        packageNames =
-          listOf(
-            "com.viewlift.hoichoi",
-            "com.hoichoi.tv.android",
-          ),
-        nativeSchemes = listOf("hoichoi://"),
-      ),
-      TvAppShortcut(
         id = "max",
         name = "Max",
         badge = "MAX",
@@ -351,13 +503,18 @@ object TvAppShortcuts {
       put("vimeo.com", listOf("com.vimeo.android.videoapp") to listOf("vimeo://"))
       put("dailymotion.com", listOf("com.dailymotion.dailymotion") to listOf("dailymotion://"))
       put("viki.com", listOf("com.viki.android") to listOf("viki://"))
-      put("erosnow.com", listOf("com.erosnow") to listOf("erosnow://"))
       put("altbalaji.com", listOf("com.balaji.alt") to listOf("altbalaji://"))
-      put("lionsgateplay.com", listOf("com.lionsgateplay.videoapp") to emptyList())
       put("kodi.tv", listOf("org.xbmc.kodi") to listOf("kodi://"))
+      put("tataskybinge.com", listOf("com.tatasky.binge", "com.tataplay.binge") to listOf("tataplaybinge://"))
+      put("discoveryplus.in", listOf("com.discovery.discoveryplus.in", "com.discovery.discoveryplus.androidtv") to listOf("discoveryplus://"))
+      put(
+        "hotstar.com",
+        listOf("in.startv.hotstar", "in.startv.hotstartvonly", "in.startv.hotstar.dplus.tv", "com.hotstar.disney") to
+          listOf("hotstar://home", "hotstar://"),
+      )
       put(
         "jiohotstar.com",
-        listOf("in.startv.hotstar", "in.startv.hotstartvonly", "in.startv.hotstar.dplus.tv") to
+        listOf("in.startv.hotstar", "in.startv.hotstartvonly", "in.startv.hotstar.dplus.tv", "com.hotstar.disney") to
           listOf("hotstar://home", "hotstar://"),
       )
     }

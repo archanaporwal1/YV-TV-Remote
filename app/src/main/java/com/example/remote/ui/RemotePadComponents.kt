@@ -863,6 +863,7 @@ fun StreamingShortcutsGrid(
   shortcuts: List<TvAppShortcut> = TvAppShortcuts.all,
   columns: Int = 3,
   compact: Boolean = false,
+  verifiedOnTvIds: Set<String> = emptySet(),
   onOpenCustomize: (() -> Unit)? = null,
   onAddOttApp: (() -> Unit)? = null,
 ) {
@@ -879,11 +880,20 @@ fun StreamingShortcutsGrid(
       horizontalArrangement = Arrangement.SpaceBetween,
       verticalAlignment = Alignment.CenterVertically,
     ) {
-      Text(
-        text = "QUICK-LAUNCH STREAMING",
-        style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-      )
+      Column {
+        Text(
+          text = "QUICK-LAUNCH STREAMING",
+          style = MaterialTheme.typography.labelMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (verifiedOnTvIds.isNotEmpty()) {
+          Text(
+            text = "${verifiedOnTvIds.size} synced on your TV",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFF10B981),
+          )
+        }
+      }
       if (onAddOttApp != null) {
         Surface(
           color = MaterialTheme.colorScheme.primaryContainer,
@@ -967,7 +977,8 @@ fun StreamingShortcutsGrid(
             borderColor = shortcut.accentColor.copy(alpha = 0.35f),
             modifier = Modifier.weight(1f).height(tileHeight).testTag("shortcut_${shortcut.id}"),
           ) {
-            Column(
+            val isVerifiedOnTv = shortcut.id in verifiedOnTvIds
+            Box(
               modifier =
                 Modifier
                   .fillMaxSize()
@@ -979,25 +990,40 @@ fun StreamingShortcutsGrid(
                           Color.Transparent,
                         )
                     )
-                  )
-                  .padding(horizontal = 6.dp, vertical = 6.dp),
-              horizontalAlignment = Alignment.CenterHorizontally,
-              verticalArrangement = Arrangement.Center,
+                  ),
             ) {
-              OttAppIconTile(
-                shortcut = shortcut,
-                modifier = Modifier.size(logoSize),
-              )
-              Spacer(Modifier.height(4.dp))
-              Text(
-                text = shortcut.name,
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center,
-              )
+              if (isVerifiedOnTv) {
+                Box(
+                  modifier =
+                    Modifier
+                      .align(Alignment.TopEnd)
+                      .padding(top = 7.dp, end = 7.dp)
+                      .size(7.dp)
+                      .clip(CircleShape)
+                      .background(Color(0xFF10B981))
+                      .testTag("verified_tv_dot_${shortcut.id}"),
+                )
+              }
+              Column(
+                modifier = Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+              ) {
+                OttAppIconTile(
+                  shortcut = shortcut,
+                  modifier = Modifier.size(logoSize),
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                  text = shortcut.name,
+                  style = MaterialTheme.typography.labelMedium,
+                  fontWeight = FontWeight.SemiBold,
+                  color = MaterialTheme.colorScheme.onSurface,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                  textAlign = TextAlign.Center,
+                )
+              }
             }
           }
         }

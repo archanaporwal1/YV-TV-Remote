@@ -61,7 +61,7 @@ data class RemoteUiPreferences(
   val showNavigationRow: Boolean = true,
   val showVolumeAndChannel: Boolean = true,
   val showMediaTransport: Boolean = true,
-  val showStreamingShortcuts: Boolean = true,
+  val showStreamingShortcuts: Boolean = false,
   val autoSyncTvApps: Boolean = true,
   val shortcutColumns: Int = 3,
   val enabledShortcutIds: Set<String> = TvAppShortcuts.defaultEnabledIds,
@@ -79,7 +79,7 @@ data class RemoteUiPreferences(
         showNavigationRow &&
         showVolumeAndChannel &&
         showMediaTransport &&
-        showStreamingShortcuts -> UiLayoutPreset.FULL
+        !showStreamingShortcuts -> UiLayoutPreset.FULL
 
       compactMode &&
         !showQuickSearchBar &&
@@ -88,8 +88,7 @@ data class RemoteUiPreferences(
         !showMediaTransport &&
         !showStreamingShortcuts -> UiLayoutPreset.MINIMAL
 
-      compactMode &&
-        showQuickSearchBar &&
+      showQuickSearchBar &&
         showNavigationRow &&
         showVolumeAndChannel &&
         showMediaTransport &&
@@ -371,7 +370,7 @@ class RemotePreferencesStore(context: Context) {
         showNavigationRow = obj.optBoolean("showNavigationRow", true),
         showVolumeAndChannel = obj.optBoolean("showVolumeAndChannel", true),
         showMediaTransport = obj.optBoolean("showMediaTransport", true),
-        showStreamingShortcuts = obj.optBoolean("showStreamingShortcuts", true),
+        showStreamingShortcuts = obj.optBoolean("showStreamingShortcuts", false),
         autoSyncTvApps = obj.optBoolean("autoSyncTvApps", true),
         shortcutColumns = obj.optInt("shortcutColumns", 3).coerceIn(2, 4),
         enabledShortcutIds = enabledIds,

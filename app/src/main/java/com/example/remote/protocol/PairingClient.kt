@@ -33,7 +33,12 @@ class PairingClient(
   }
 
   sealed class PinSubmitResult {
-    data object Success : PinSubmitResult()
+    data class Success(
+      val pairingTokenHash: String = "",
+      val serverCertFingerprintSha256: String = "",
+      val serverName: String = "",
+    ) : PinSubmitResult()
+
     data class InvalidPinFormatOrCheck(val reason: String) : PinSubmitResult()
     data class RejectedByTv(val reason: String) : PinSubmitResult()
     data class ConnectionLost(val reason: String) : PinSubmitResult()
@@ -45,6 +50,11 @@ class PairingClient(
     private val output: OutputStream,
     private val clientPublicKey: RSAPublicKey,
     private val serverPublicKey: RSAPublicKey,
+    private val host: String = "",
+    private val controlPort: Int = RemoteControlClient.DEFAULT_REMOTE_PORT,
+    private val serverName: String = "",
+    private val serverCertFingerprintSha256: String = "",
+    private val onPairingConfirmed: (pairingTokenHash: String) -> Unit = {},
   ) {
     suspend fun submitPin(rawPin: String): PinSubmitResult = withContext(Dispatchers.IO) {
       val pin = rawPin.trim().uppercase()
@@ -105,8 +115,18 @@ class PairingClient(
           )
         }
 
+        val tokenDigest = MessageDigest.getInstance("SHA-256")
+        tokenDigest.update(computedSecret)
+        tokenDigest.update(serverCertFingerprintSha256.toByteArray(Charsets.UTF_8))
+        val pairingTokenHash = tokenDigest.digest().joinToString("") { "%02X".format(it) }
+        runCatching { onPairingConfirmed(pairingTokenHash) }
+
         close()
-        PinSubmitResult.Success
+        PinSubmitResult.Success(
+          pairingTokenHash = pairingTokenHash,
+          serverCertFingerprintSha256 = serverCertFingerprintSha256,
+          serverName = serverName.ifBlank { host },
+        )
       } catch (ce: kotlinx.coroutines.CancellationException) {
         close()
         throw ce
@@ -150,6 +170,11 @@ class PairingClient(
           tls.trustManager.capturedServerPublicKey
             ?: (socket.session.peerCertificates.firstOrNull()?.publicKey as? RSAPublicKey)
             ?: throw IOException("Unable to extract TV RSA public key from TLS certificate.")
+        val serverFingerprint =
+          tls.trustManager.capturedServerCertFingerprintSha256
+            ?: (socket.session.peerCertificates.firstOrNull() as? java.security.cert.X509Certificate)
+              ?.let { runCatching { CertificateManager.computeCertFingerprintSha256(it) }.getOrNull() }
+            ?: ""
 
         val input = socket.inputStream
         val output = socket.outputStream
@@ -238,6 +263,19 @@ class PairingClient(
               output = output,
               clientPublicKey = tls.clientPublicKey,
               serverPublicKey = serverKey,
+              host = host,
+              controlPort = RemoteControlClient.DEFAULT_REMOTE_PORT,
+              serverName = serverName,
+              serverCertFingerprintSha256 = serverFingerprint,
+              onPairingConfirmed = { tokenHash ->
+                certificateManager.savePairedTvCredential(
+                  ipAddress = host,
+                  controlPort = RemoteControlClient.DEFAULT_REMOTE_PORT,
+                  serverName = serverName,
+                  serverCertFingerprintSha256 = serverFingerprint,
+                  pairingTokenHash = tokenHash,
+                )
+              },
             ),
           serverName = serverName,
         )

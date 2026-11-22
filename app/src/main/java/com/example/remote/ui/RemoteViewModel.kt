@@ -18,6 +18,7 @@ import com.example.remote.data.PreferredPadMode
 import com.example.remote.data.RemotePreferencesStore
 import com.example.remote.data.RemoteUiPreferences
 import com.example.remote.data.SavedTvConnection
+import com.example.remote.data.SslCredentialsDataStore
 import com.example.remote.data.TvAppShortcut
 import com.example.remote.data.TvAppShortcuts
 import com.example.remote.data.TvDetectedAppSync
@@ -133,6 +134,7 @@ data class RemoteUiState(
   val showConnectionHub: Boolean = true,
   val showSettingsSheet: Boolean = false,
   val showCustomizeUiSheet: Boolean = false,
+  val showOttAppsSheet: Boolean = false,
   val showKeyboardSheet: Boolean = false,
   val tvImeState: TvImeState = TvImeState(),
   val voiceState: VoiceInputUiState = VoiceInputUiState(),
@@ -147,7 +149,8 @@ data class RemoteUiState(
 
 class RemoteViewModel(application: Application) : AndroidViewModel(application) {
 
-  private val certificateManager = CertificateManager(application)
+  private val sslCredentialsStore = SslCredentialsDataStore(application)
+  private val certificateManager = CertificateManager(application, sslCredentialsStore)
   private val discoveryManager = TvDiscoveryManager(application)
   private val pairingClient = PairingClient(certificateManager, application)
   private val remoteClient = RemoteControlClient(certificateManager, application)
@@ -181,6 +184,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   private var hasSeenInitialNetworkCallback = false
   private var detectedTvAppsCache: List<DetectedTvApp> = emptyList()
   private var dismissedAutoSyncIds: Set<String> = emptySet()
+  private var pairedCredentialHosts: Set<String> = emptySet()
   private val reconnectMutex = Mutex()
   private val safeCoroutineHandler =
     CoroutineExceptionHandler { _, throwable ->
@@ -209,6 +213,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
   init {
     runCatching { loadStoredState() }
+    observeSslCredentials()
     observeDiscovery()
     observeRemoteSession()
     observeTvImeState()
@@ -217,6 +222,14 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     registerNetworkCallback()
     attemptAutoReconnectIfEnabled()
     syncAndCheckUpdatesOnStartup()
+  }
+
+  private fun observeSslCredentials() {
+    viewModelScope.launch(safeCoroutineHandler) {
+      sslCredentialsStore.pairedCredentialsFlow.collect { credentials ->
+        pairedCredentialHosts = credentials.map { it.hostKey }.toSet()
+      }
+    }
   }
 
   private fun observeTvImeState() {
@@ -234,6 +247,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
               !state.voiceState.showVoiceSheet
           state.copy(
             tvImeState = ime,
+            showOttAppsSheet = if (shouldAutoOpenKeyboard) false else state.showOttAppsSheet,
             showKeyboardSheet = if (shouldAutoOpenKeyboard) true else state.showKeyboardSheet,
           )
         }
@@ -399,6 +413,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     val currentSaved = _uiState.value.savedConnections
     if (currentSaved.isEmpty()) return
     var anyChanged = false
+    val ipMigrations = mutableListOf<Triple<String, String, Int>>()
     val updatedSaved =
       currentSaved.map { saved ->
         val match =
@@ -408,6 +423,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
           }
         if (match != null && (match.ipAddress != saved.ipAddress || match.port != saved.port)) {
           anyChanged = true
+          ipMigrations.add(Triple(saved.ipAddress, match.ipAddress, match.port))
           if (lastActiveTarget?.deviceName?.equals(saved.deviceName, ignoreCase = true) == true) {
             lastActiveTarget =
               lastActiveTarget?.copy(ipAddress = match.ipAddress, controlPort = match.port)
@@ -425,6 +441,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     _uiState.update { it.copy(savedConnections = updatedSaved) }
     viewModelScope.launch(Dispatchers.IO) {
       runCatching { prefsStore.saveConnections(updatedSaved) }
+      ipMigrations.forEach { (oldIp, newIp, newPort) ->
+        runCatching { sslCredentialsStore.updatePairedHostAddress(oldIp, newIp, newPort) }
+      }
     }
   }
 
@@ -495,6 +514,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
               }
               publishDetectedAppsForActiveTv(target.ipAddress)
               viewModelScope.launch(safeCoroutineHandler) {
+                val serverFp = remoteClient.lastServerCertFingerprintSha256
                 val (saved, allSaved) =
                   withContext(Dispatchers.IO) {
                     val upserted =
@@ -506,6 +526,24 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                         port = target.controlPort,
                       )
                     prefsStore.setLastConnectedTvId(upserted.id)
+                    runCatching {
+                      if (sslCredentialsStore.hasPairedCredential(target.ipAddress, serverFp)) {
+                        sslCredentialsStore.updateLastConnected(
+                          ipAddress = target.ipAddress,
+                          controlPort = target.controlPort,
+                          serverName = target.deviceName,
+                          serverCertFingerprintSha256 = serverFp,
+                        )
+                      } else {
+                        certificateManager.savePairedTvCredential(
+                          ipAddress = target.ipAddress,
+                          controlPort = target.controlPort,
+                          serverName = target.deviceName,
+                          serverCertFingerprintSha256 = serverFp.orEmpty(),
+                          pairingTokenHash = "",
+                        )
+                      }
+                    }
                     upserted to prefsStore.loadSavedConnections()
                   }
                 _uiState.update { state ->
@@ -536,8 +574,11 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
             inFlightReconnect = null
             val target = pendingTarget ?: lastActiveTarget
             if (target != null) {
+              val normalizedTargetHost = SslCredentialsDataStore.normalizeHost(target.ipAddress)
               val isPreviouslyPaired =
-                _uiState.value.savedConnections.any { it.ipAddress == target.ipAddress }
+                _uiState.value.savedConnections.any { it.ipAddress == target.ipAddress } ||
+                  normalizedTargetHost in pairedCredentialHosts ||
+                  certificateManager.hasStoredCredentialForHost(target.ipAddress)
               if (postPairingReconnectRetryAvailable) {
                 postPairingReconnectRetryAvailable = false
                 autoReconnectJob?.cancel()
@@ -952,6 +993,10 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     navigateToRemoteOnConnect = true
     pendingTarget = target
     lastActiveTarget = target
+    certificateManager.clearCachedHostCredential(target.ipAddress)
+    viewModelScope.launch(Dispatchers.IO) {
+      runCatching { sslCredentialsStore.removePairedCredential(target.ipAddress) }
+    }
     remoteClient.disconnect()
     initiatePairing(target)
   }
@@ -1115,6 +1160,17 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 customName = finalName,
                 profileId = _uiState.value.activeProfileId,
               )
+          withContext(Dispatchers.IO) {
+            runCatching {
+              certificateManager.savePairedTvCredential(
+                ipAddress = target.ipAddress,
+                controlPort = target.controlPort,
+                serverName = result.serverName.ifBlank { target.deviceName },
+                serverCertFingerprintSha256 = result.serverCertFingerprintSha256,
+                pairingTokenHash = result.pairingTokenHash,
+              )
+            }
+          }
           val saved =
             prefsStore.upsertConnection(
               profileId = target.profileId,
@@ -1224,6 +1280,11 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     _uiState.update { it.copy(showSettingsSheet = show) }
   }
 
+  fun openOttAppsSheet(show: Boolean) {
+    feedbackManager.trigger(FeedbackCue.NAV_TICK, _uiState.value.settings)
+    _uiState.update { it.copy(showOttAppsSheet = show) }
+  }
+
   fun openKeyboardSheet(show: Boolean) {
     feedbackManager.trigger(FeedbackCue.NAV_TICK, _uiState.value.settings)
     if (!show) {
@@ -1234,7 +1295,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
   fun openSearchWithKeyboard() {
     feedbackManager.trigger(FeedbackCue.CONFIRM_CHIME, _uiState.value.settings)
-    _uiState.update { it.copy(showKeyboardSheet = true) }
+    _uiState.update { it.copy(showOttAppsSheet = false, showKeyboardSheet = true) }
     viewModelScope.launch(safeCoroutineHandler) {
       sendWithAutoRecovery(userInitiated = true) {
         remoteClient.sendKey(RemoteKeyCode.KEYCODE_SEARCH, RemoteDirection.SHORT)
@@ -1561,6 +1622,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
   fun launchShortcut(shortcut: TvAppShortcut) {
     feedbackManager.trigger(FeedbackCue.POWER_OR_APP, _uiState.value.settings)
+    _uiState.update { it.copy(showOttAppsSheet = false) }
     ottLaunchJob?.cancel()
     ottLaunchJob =
       viewModelScope.launch(safeCoroutineHandler) {
@@ -1807,10 +1869,17 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   }
 
   fun deleteSavedTv(id: String) {
+    val removed = _uiState.value.savedConnections.firstOrNull { it.id == id }
     val updated = _uiState.value.savedConnections.filterNot { it.id == id }
     prefsStore.saveConnections(updated)
     if (prefsStore.getLastConnectedTvId() == id) {
       prefsStore.setLastConnectedTvId(null)
+    }
+    if (removed != null && updated.none { it.ipAddress == removed.ipAddress }) {
+      certificateManager.clearCachedHostCredential(removed.ipAddress)
+      viewModelScope.launch(Dispatchers.IO) {
+        runCatching { sslCredentialsStore.removePairedCredential(removed.ipAddress) }
+      }
     }
     _uiState.update {
       it.copy(
@@ -2011,7 +2080,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
             showNavigationRow = true,
             showVolumeAndChannel = true,
             showMediaTransport = true,
-            showStreamingShortcuts = true,
+            showStreamingShortcuts = false,
             shortcutColumns = 3,
           )
         UiLayoutPreset.MINIMAL ->
@@ -2077,10 +2146,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
       current.copy(
         customShortcuts = nextCustom,
         enabledShortcutIds = current.enabledShortcutIds + preset.id,
-        showStreamingShortcuts = true,
       )
     }
-    _uiState.update { it.copy(statusBannerMessage = "Added ${preset.name} to your remote") }
+    _uiState.update { it.copy(statusBannerMessage = "Added ${preset.name} to OTT Apps") }
   }
 
   fun addCustomOttShortcut(
@@ -2119,10 +2187,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
       current.copy(
         customShortcuts = current.customShortcuts + newShortcut,
         enabledShortcutIds = current.enabledShortcutIds + newShortcut.id,
-        showStreamingShortcuts = true,
       )
     }
-    _uiState.update { it.copy(statusBannerMessage = "Added \"$cleanName\" to your remote") }
+    _uiState.update { it.copy(statusBannerMessage = "Added \"$cleanName\" to OTT Apps") }
   }
 
   fun updateCustomOttShortcut(

@@ -1,7 +1,8 @@
 package com.example.remote.ui
 
+import android.content.Context
+import android.view.inputmethod.InputMethodManager
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -54,7 +56,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -79,8 +83,24 @@ fun KeyboardSearchSheet(
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
   val focusRequester = remember { FocusRequester() }
   val keyboardController = LocalSoftwareKeyboardController.current
+  val context = LocalContext.current
+  val view = LocalView.current
   var useDirectKeys by remember { mutableStateOf(false) }
   var query by remember { mutableStateOf(imeState.currentText) }
+
+  val showSoftKeyboardNow: () -> Unit = {
+    runCatching {
+      focusRequester.requestFocus()
+      keyboardController?.show()
+      val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+      view.post {
+        runCatching {
+          keyboardController?.show()
+          imm?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+        }
+      }
+    }
+  }
 
   LaunchedEffect(imeState.currentText) {
     if (!useDirectKeys && imeState.currentText != query) {
@@ -95,16 +115,16 @@ fun KeyboardSearchSheet(
     contentColor = MaterialTheme.colorScheme.onSurface,
   ) {
     LaunchedEffect(Unit) {
-      kotlinx.coroutines.delay(120L)
-      runCatching {
-        focusRequester.requestFocus()
-        keyboardController?.show()
-      }
+      kotlinx.coroutines.delay(90L)
+      showSoftKeyboardNow()
+      kotlinx.coroutines.delay(180L)
+      showSoftKeyboardNow()
     }
     Column(
       modifier =
         Modifier
           .fillMaxWidth()
+          .navigationBarsPadding()
           .imePadding()
           .verticalScroll(rememberScrollState())
           .padding(horizontal = 20.dp)
@@ -248,10 +268,7 @@ fun KeyboardSearchSheet(
         OutlinedButton(
           onClick = {
             onSendKey(RemoteKeyCode.KEYCODE_SEARCH, FeedbackCue.CONFIRM_CHIME)
-            runCatching {
-              focusRequester.requestFocus()
-              keyboardController?.show()
-            }
+            showSoftKeyboardNow()
           },
           border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
           contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),

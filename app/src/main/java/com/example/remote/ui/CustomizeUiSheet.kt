@@ -487,8 +487,8 @@ fun CustomizeUiSheet(
 
             FeatureToggleRow(
               icon = Icons.Rounded.Apps,
-              title = "Quick-Launch Streaming Apps",
-              subtitle = "One-tap OTT app tiles at the bottom of your remote",
+              title = "Pin OTT Apps on Main Remote",
+              subtitle = "Keep off for a clean remote — always accessible via the Apps button",
               checked = uiPrefs.showStreamingShortcuts,
               testTag = "pref_show_ott_switch",
               onCheckedChange = { enabled ->
@@ -499,15 +499,14 @@ fun CustomizeUiSheet(
         }
       }
 
-      // Streaming Apps & Grid Density
+      // Streaming Apps & Grid Density (always available for the on-demand OTT Apps drawer)
       item {
-        AnimatedVisibility(visible = uiPrefs.showStreamingShortcuts) {
-          Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-            modifier = Modifier.fillMaxWidth(),
-          ) {
+        Surface(
+          color = MaterialTheme.colorScheme.surfaceVariant,
+          shape = RoundedCornerShape(18.dp),
+          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+          modifier = Modifier.fillMaxWidth(),
+        ) {
             Column(
               modifier = Modifier.padding(16.dp),
               verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -653,10 +652,9 @@ fun CustomizeUiSheet(
               }
             }
           }
-        }
       }
 
-      if (uiPrefs.showStreamingShortcuts && uiPrefs.customShortcuts.isNotEmpty()) {
+      if (uiPrefs.customShortcuts.isNotEmpty()) {
         item {
           Text(
             text = "YOUR ADDED OTT APPS",

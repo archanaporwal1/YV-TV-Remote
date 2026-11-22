@@ -128,6 +128,9 @@ class RemoteControlClient(
   @Volatile private var serverSendsPings: Boolean = false
   @Volatile private var serverAnswersClientPings: Boolean = false
   @Volatile private var activeAppLinkProbe: String? = null
+  @Volatile private var connectedHost: String? = null
+  @Volatile var lastServerCertFingerprintSha256: String? = null
+    private set
   private val unansweredClientPings = AtomicInteger(0)
   private val pingSequence = AtomicInteger(1)
 
@@ -161,7 +164,7 @@ class RemoteControlClient(
         var plainSocket: java.net.Socket? = null
         var sslSocket: SSLSocket? = null
         try {
-          val tls = certificateManager.createTlsSessionContext()
+          val tls = certificateManager.createTlsSessionContext(tvHost = host)
           plainSocket =
             WifiNetworkBinder.createPlainSocket(appContext, host).apply {
               keepAlive = true
@@ -180,6 +183,11 @@ class RemoteControlClient(
             }
           socket = sslSocket
           outputStream = sslSocket.outputStream
+          connectedHost = host
+          lastServerCertFingerprintSha256 =
+            tls.trustManager.capturedServerCertFingerprintSha256
+              ?: (sslSocket.session.peerCertificates.firstOrNull() as? java.security.cert.X509Certificate)
+                ?.let { runCatching { CertificateManager.computeCertFingerprintSha256(it) }.getOrNull() }
           lastInboundAtMs = System.currentTimeMillis()
           serverSendsPings = false
           serverAnswersClientPings = false
@@ -385,14 +393,20 @@ class RemoteControlClient(
             val status = imeInject.textFieldStatus
             val appPkg = imeInject.appInfo.appPackage.trim()
             val appLbl = imeInject.appInfo.label.trim()
+            val fieldLabelText = status.label.trim()
+            val isSearchFieldFocused =
+              status.counterField > 0 &&
+                (fieldLabelText.contains("search", ignoreCase = true) ||
+                  fieldLabelText.contains("find", ignoreCase = true))
             _imeState.update { current ->
               current.copy(
                 imeCounter = imeInject.appInfo.counter,
                 fieldCounter = status.counterField,
                 currentText = status.value,
-                fieldLabel = status.label.ifBlank { current.fieldLabel },
+                fieldLabel = fieldLabelText.ifBlank { current.fieldLabel },
                 appLabel = appLbl.ifBlank { current.appLabel },
                 appPackage = appPkg.ifBlank { current.appPackage },
+                isImeRequested = if (isSearchFieldFocused) true else current.isImeRequested,
               )
             }
             if (appPkg.isNotEmpty()) {
@@ -499,7 +513,8 @@ class RemoteControlClient(
 
   private suspend fun sendConfigureReply(featureCode: Int, targetSocket: SSLSocket): Boolean {
     val rawModel = Build.MODEL.orEmpty().ifBlank { "Android" }
-    val deviceTag = runCatching { certificateManager.getClientDeviceTag().take(4) }.getOrDefault("")
+    val deviceTag =
+      runCatching { certificateManager.getClientDeviceTag(connectedHost).take(4) }.getOrDefault("")
     val modelName = if (deviceTag.isNotEmpty()) "$rawModel-$deviceTag" else rawModel
     val vendorName = Build.MANUFACTURER.orEmpty().ifBlank { "Android" }
     val deviceInfo =

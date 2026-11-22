@@ -168,6 +168,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   private var navigateToRemoteOnConnect = true
   private var autoConnectAttempted = false
   private var postPairingReconnectRetryAvailable = false
+  private var pairedTvTlsRetryCount = 0
   private var unexpectedDisconnectRetryCount = 0
   private var rapidDropCount = 0
   private var lastConnectedAtMs = 0L
@@ -219,9 +220,23 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   }
 
   private fun observeTvImeState() {
+    var previousImeRequested = false
     viewModelScope.launch(safeCoroutineHandler) {
       remoteClient.imeState.collect { ime ->
-        _uiState.update { it.copy(tvImeState = ime) }
+        val becameRequested = !previousImeRequested && ime.isImeRequested
+        previousImeRequested = ime.isImeRequested
+        _uiState.update { state ->
+          val shouldAutoOpenKeyboard =
+            becameRequested &&
+              !state.showConnectionHub &&
+              !state.showSettingsSheet &&
+              !state.showCustomizeUiSheet &&
+              !state.voiceState.showVoiceSheet
+          state.copy(
+            tvImeState = ime,
+            showKeyboardSheet = if (shouldAutoOpenKeyboard) true else state.showKeyboardSheet,
+          )
+        }
       }
     }
   }
@@ -455,6 +470,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
           is RemoteControlClient.SessionEvent.Connected -> {
             postPairingReconnectRetryAvailable = false
+            pairedTvTlsRetryCount = 0
             autoReconnectPaused = false
             silentAutoHealInProgress = false
             inFlightReconnect?.complete(true)
@@ -478,33 +494,35 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 )
               }
               publishDetectedAppsForActiveTv(target.ipAddress)
-              val (saved, allSaved) =
-                withContext(Dispatchers.IO) {
-                  val upserted =
-                    prefsStore.upsertConnection(
-                      profileId = target.profileId,
-                      customName = target.customName,
-                      deviceName = target.deviceName,
-                      ipAddress = target.ipAddress,
-                      port = target.controlPort,
-                    )
-                  prefsStore.setLastConnectedTvId(upserted.id)
-                  upserted to prefsStore.loadSavedConnections()
+              viewModelScope.launch(safeCoroutineHandler) {
+                val (saved, allSaved) =
+                  withContext(Dispatchers.IO) {
+                    val upserted =
+                      prefsStore.upsertConnection(
+                        profileId = target.profileId,
+                        customName = target.customName,
+                        deviceName = target.deviceName,
+                        ipAddress = target.ipAddress,
+                        port = target.controlPort,
+                      )
+                    prefsStore.setLastConnectedTvId(upserted.id)
+                    upserted to prefsStore.loadSavedConnections()
+                  }
+                _uiState.update { state ->
+                  val currentStatus = state.connectionStatus
+                  state.copy(
+                    savedConnections = allSaved,
+                    connectionStatus =
+                      if (currentStatus is ConnectionStatus.Connected &&
+                        currentStatus.ipAddress == saved.ipAddress &&
+                        currentStatus.port == saved.port
+                      ) {
+                        currentStatus.copy(displayName = saved.customName, deviceName = saved.deviceName)
+                      } else {
+                        currentStatus
+                      },
+                  )
                 }
-              _uiState.update { state ->
-                val currentStatus = state.connectionStatus
-                state.copy(
-                  savedConnections = allSaved,
-                  connectionStatus =
-                    if (currentStatus is ConnectionStatus.Connected &&
-                      currentStatus.ipAddress == saved.ipAddress &&
-                      currentStatus.port == saved.port
-                    ) {
-                      currentStatus.copy(displayName = saved.customName, deviceName = saved.deviceName)
-                    } else {
-                      currentStatus
-                    },
-                )
               }
             }
           }
@@ -516,19 +534,43 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
             silentAutoHealInProgress = false
             inFlightReconnect?.complete(false)
             inFlightReconnect = null
-            unexpectedDisconnectRetryCount = 0
-            rapidDropCount = 0
-            lastConnectedAtMs = 0L
-            autoReconnectPaused = false
-            val target = pendingTarget
+            val target = pendingTarget ?: lastActiveTarget
             if (target != null) {
+              val isPreviouslyPaired =
+                _uiState.value.savedConnections.any { it.ipAddress == target.ipAddress }
               if (postPairingReconnectRetryAvailable) {
                 postPairingReconnectRetryAvailable = false
-                delay(500L)
-                reconnectMutex.withLock {
-                  remoteClient.connect(target.ipAddress, target.controlPort)
-                }
+                autoReconnectJob?.cancel()
+                autoReconnectJob =
+                  viewModelScope.launch(safeCoroutineHandler) {
+                    delay(500L)
+                    reconnectMutex.withLock {
+                      remoteClient.connect(target.ipAddress, target.controlPort)
+                    }
+                  }
+              } else if (isPreviouslyPaired && !event.isExplicitTlsRejection) {
+                // Already-paired TV closed the control channel early (typical during
+                // multi-device handoff when another phone briefly held the TV session).
+                // Never ask for a pairing code again — recover as a transient disconnect.
+                handleUnexpectedSessionInterruption(event.reason)
+              } else if (isPreviouslyPaired && event.isExplicitTlsRejection && pairedTvTlsRetryCount < 1) {
+                // Give already-paired TVs one silent reconnect retry before concluding the TV
+                // genuinely evicted our certificate.
+                pairedTvTlsRetryCount++
+                autoReconnectJob?.cancel()
+                autoReconnectJob =
+                  viewModelScope.launch(safeCoroutineHandler) {
+                    delay(450L)
+                    reconnectMutex.withLock {
+                      remoteClient.connect(target.ipAddress, target.controlPort)
+                    }
+                  }
               } else {
+                unexpectedDisconnectRetryCount = 0
+                rapidDropCount = 0
+                lastConnectedAtMs = 0L
+                autoReconnectPaused = false
+                pairedTvTlsRetryCount = 0
                 initiatePairing(target)
               }
             }
@@ -621,13 +663,13 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
       autoReconnectJob = null
       val displayMsg =
         if (hitRapidDropCap) {
-          "Connection kept dropping right after connecting (${rapidDropCount}x). Auto-retry paused."
+          "Background sync paused (TV busy or another remote active). Press any key to reconnect."
         } else {
           errorMessage
         }
       val detail =
         if (hitRapidDropCap) {
-          "Last cause: $errorMessage. Tap Re-pair TV to refresh the pairing certificate or Retry to reconnect."
+          "Last cause: $errorMessage. Press any remote key to reconnect automatically, or tap Re-pair TV if the TV reset pairing."
         } else {
           errorMessage
         }
@@ -905,6 +947,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     autoReconnectPaused = false
     rapidDropCount = 0
     unexpectedDisconnectRetryCount = 0
+    pairedTvTlsRetryCount = 0
     lastConnectedAtMs = 0L
     navigateToRemoteOnConnect = true
     pendingTarget = target
@@ -964,6 +1007,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     rapidDropCount = 0
     lastConnectedAtMs = 0L
     postPairingReconnectRetryAvailable = false
+    pairedTvTlsRetryCount = 0
     pendingTarget = target
     lastActiveTarget = target
     discoveryManager.stopScan()
@@ -1148,6 +1192,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     rapidDropCount = 0
     lastConnectedAtMs = 0L
     unexpectedDisconnectRetryCount = 0
+    pairedTvTlsRetryCount = 0
     releaseHeldKeyIfNeeded()
     tvVoiceAudioStreamer.stopStreaming()
     connectionStabilityJob?.cancel()
@@ -1187,9 +1232,23 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     _uiState.update { it.copy(showKeyboardSheet = show) }
   }
 
+  fun openSearchWithKeyboard() {
+    feedbackManager.trigger(FeedbackCue.CONFIRM_CHIME, _uiState.value.settings)
+    _uiState.update { it.copy(showKeyboardSheet = true) }
+    viewModelScope.launch(safeCoroutineHandler) {
+      sendWithAutoRecovery(userInitiated = true) {
+        remoteClient.sendKey(RemoteKeyCode.KEYCODE_SEARCH, RemoteDirection.SHORT)
+      }
+    }
+  }
+
   fun sendKeyboardImeText(newText: String, previousText: String) {
     viewModelScope.launch(safeCoroutineHandler) {
-      remoteClient.sendImeText(newText = newText, previousLength = previousText.length)
+      if (_uiState.value.tvImeState.isImeRequested) {
+        sendWithAutoRecovery(userInitiated = true) {
+          remoteClient.sendImeText(newText = newText, previousLength = previousText.length)
+        }
+      }
     }
   }
 
@@ -1198,15 +1257,15 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     feedbackManager.trigger(FeedbackCue.CONFIRM_CHIME, _uiState.value.settings)
     viewModelScope.launch(safeCoroutineHandler) {
       val sent =
-        sendWithAutoRecovery {
+        sendWithAutoRecovery(userInitiated = true) {
+          val imeState = _uiState.value.tvImeState
           val textOk =
             if (clean.isEmpty()) {
               true
-            } else if (useDirectKeys) {
+            } else if (useDirectKeys || !imeState.isImeRequested) {
               remoteClient.sendTextAsKeyEvents(clean)
             } else {
-              val prevLen = _uiState.value.tvImeState.currentText.length
-              remoteClient.sendImeText(newText = clean, previousLength = prevLen)
+              remoteClient.sendImeText(newText = clean, previousLength = imeState.currentText.length)
             }
           if (textOk) {
             remoteClient.sendKey(RemoteKeyCode.KEYCODE_ENTER, RemoteDirection.SHORT)
@@ -1502,22 +1561,14 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
   fun launchShortcut(shortcut: TvAppShortcut) {
     feedbackManager.trigger(FeedbackCue.POWER_OR_APP, _uiState.value.settings)
-    if (autoReconnectPaused) {
-      _uiState.update {
-        it.copy(
-          statusBannerMessage = "Connection paused after repeated drops. Tap Re-pair TV or Retry."
-        )
-      }
-      return
-    }
     ottLaunchJob?.cancel()
     ottLaunchJob =
       viewModelScope.launch(safeCoroutineHandler) {
-        if (!ensureConnectedForCommand()) {
+        if (!ensureConnectedForCommand(userInitiated = true)) {
           _uiState.update {
             it.copy(
               statusBannerMessage =
-                if (autoReconnectPaused) "Connection paused after repeated drops. Tap Re-pair TV or Retry."
+                if (autoReconnectPaused) "Unable to reach TV right now. Check Wi-Fi or tap Retry."
                 else "Connect to your TV to launch ${shortcut.name}."
             )
           }
@@ -1527,9 +1578,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         var outcome = remoteClient.launchAppWithPlan(plan)
         if (
           outcome == OttLaunchOutcome.FAILED &&
-          !autoReconnectPaused &&
-          _uiState.value.connectionStatus !is ConnectionStatus.Error &&
-          ensureConnectedForCommand(forceReconnect = true)
+          _uiState.value.connectionStatus !is ConnectionStatus.Pairing &&
+          ensureConnectedForCommand(forceReconnect = true, userInitiated = true)
         ) {
           outcome = remoteClient.launchAppWithPlan(plan)
         }
@@ -1548,18 +1598,31 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
             }
             OttLaunchOutcome.OPENED_IN_BROWSER -> "${shortcut.name} app not on TV — opening in TV browser..."
             OttLaunchOutcome.FAILED ->
-              if (autoReconnectPaused) "Connection paused after repeated drops. Tap Re-pair TV or Retry."
-              else "Connect to your TV to launch ${shortcut.name}."
+              "Connect to your TV to launch ${shortcut.name}."
           }
         _uiState.update { it.copy(statusBannerMessage = banner) }
       }
   }
 
-  private suspend fun ensureConnectedForCommand(forceReconnect: Boolean = false): Boolean {
+  private suspend fun ensureConnectedForCommand(
+    forceReconnect: Boolean = false,
+    userInitiated: Boolean = true,
+  ): Boolean {
     if (!forceReconnect && remoteClient.isConnectionHealthy()) return true
-    if (autoReconnectPaused) return false
-    val target = lastActiveTarget ?: pendingTarget ?: return false
-    if (userManuallyDisconnected || !_uiState.value.settings.autoReconnectEnabled) return false
+    if (userInitiated) {
+      // Any explicit user key press, OTT tap, or search immediately clears background
+      // reconnect pause (e.g. after multi-device handoff) and silently reconnects.
+      if (autoReconnectPaused) {
+        autoReconnectPaused = false
+        rapidDropCount = 0
+        unexpectedDisconnectRetryCount = 0
+      }
+      userManuallyDisconnected = false
+    } else if (autoReconnectPaused) {
+      return false
+    }
+    val target = lastActiveTarget ?: pendingTarget ?: resolveLastSavedTarget(_uiState.value) ?: return false
+    if (!userInitiated && (userManuallyDisconnected || !_uiState.value.settings.autoReconnectEnabled)) return false
     if (_uiState.value.connectionStatus is ConnectionStatus.Pairing) return false
 
     // Single-flight coalescing: if a silent auto-heal or command reconnect is already running,
@@ -1576,11 +1639,16 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     autoReconnectJob?.cancel()
     autoReconnectJob = null
     return reconnectMutex.withLock {
-      if (autoReconnectPaused) {
+      if (!userInitiated && autoReconnectPaused) {
         false
       } else if (!forceReconnect && remoteClient.isConnectionHealthy()) {
         true
       } else {
+        if (userInitiated) {
+          autoReconnectPaused = false
+          rapidDropCount = 0
+          unexpectedDisconnectRetryCount = 0
+        }
         val deferred = CompletableDeferred<Boolean>()
         inFlightReconnect?.complete(false)
         inFlightReconnect = deferred
@@ -1611,10 +1679,13 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     }
   }
 
-  private suspend fun sendWithAutoRecovery(action: suspend () -> Boolean): Boolean {
+  private suspend fun sendWithAutoRecovery(
+    userInitiated: Boolean = true,
+    action: suspend () -> Boolean,
+  ): Boolean {
     if (action()) return true
-    if (autoReconnectPaused) return false
-    return if (ensureConnectedForCommand(forceReconnect = true)) action() else false
+    if (!userInitiated && autoReconnectPaused) return false
+    return if (ensureConnectedForCommand(forceReconnect = true, userInitiated = userInitiated)) action() else false
   }
 
   fun clearBannerMessage() {

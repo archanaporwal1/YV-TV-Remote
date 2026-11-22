@@ -10,12 +10,15 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Backspace
 import androidx.compose.material.icons.automirrored.rounded.KeyboardReturn
@@ -51,6 +54,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -74,6 +78,7 @@ fun KeyboardSearchSheet(
 ) {
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
   val focusRequester = remember { FocusRequester() }
+  val keyboardController = LocalSoftwareKeyboardController.current
   var useDirectKeys by remember { mutableStateOf(false) }
   var query by remember { mutableStateOf(imeState.currentText) }
 
@@ -91,10 +96,19 @@ fun KeyboardSearchSheet(
   ) {
     LaunchedEffect(Unit) {
       kotlinx.coroutines.delay(120L)
-      runCatching { focusRequester.requestFocus() }
+      runCatching {
+        focusRequester.requestFocus()
+        keyboardController?.show()
+      }
     }
     Column(
-      modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 28.dp),
+      modifier =
+        Modifier
+          .fillMaxWidth()
+          .imePadding()
+          .verticalScroll(rememberScrollState())
+          .padding(horizontal = 20.dp)
+          .padding(bottom = 28.dp),
       verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
       Row(
@@ -232,7 +246,13 @@ fun KeyboardSearchSheet(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
       ) {
         OutlinedButton(
-          onClick = { onSendKey(RemoteKeyCode.KEYCODE_SEARCH, FeedbackCue.CONFIRM_CHIME) },
+          onClick = {
+            onSendKey(RemoteKeyCode.KEYCODE_SEARCH, FeedbackCue.CONFIRM_CHIME)
+            runCatching {
+              focusRequester.requestFocus()
+              keyboardController?.show()
+            }
+          },
           border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
           contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
           modifier = Modifier.weight(1f).height(48.dp).testTag("keyboard_open_tv_search"),

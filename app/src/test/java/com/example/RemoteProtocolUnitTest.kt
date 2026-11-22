@@ -154,6 +154,25 @@ class RemoteProtocolUnitTest {
         javax.net.ssl.SSLException("Connection timed out")
       )
     )
+    // Multi-device TV handoff often closes/resets the TLS socket during handshake;
+    // must be classified as transient disconnect, NOT pairing rejection.
+    org.junit.Assert.assertFalse(
+      com.example.remote.protocol.RemoteControlClient.isCertificateOrHandshakeError(
+        javax.net.ssl.SSLHandshakeException("Connection closed by peer")
+      )
+    )
+    org.junit.Assert.assertFalse(
+      com.example.remote.protocol.RemoteControlClient.isCertificateOrHandshakeError(
+        javax.net.ssl.SSLHandshakeException("Handshake aborted").apply {
+          initCause(java.net.SocketException("Connection reset by peer"))
+        }
+      )
+    )
+    org.junit.Assert.assertTrue(
+      com.example.remote.protocol.RemoteControlClient.isCertificateOrHandshakeError(
+        javax.net.ssl.SSLHandshakeException("TLSV1_ALERT_UNKNOWN_CA")
+      )
+    )
   }
 
   @Test

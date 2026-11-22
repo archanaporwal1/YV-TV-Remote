@@ -1939,6 +1939,346 @@ class ExampleRobolectricTest {
     // Still remains available in detectedTvShortcuts for 1-tap re-add in Add OTT dialog
     assertTrue(viewModel.uiState.value.detectedTvShortcuts.any { it.id == "airtel_xstream" })
   }
+
+  @Test
+  fun `multiple devices generate unique client certificate CNs so TV never overwrites paired certs`() {
+    val baseApp = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val dirA = java.io.File(baseApp.cacheDir, "device_a_${System.nanoTime()}").apply { mkdirs() }
+    val dirB = java.io.File(baseApp.cacheDir, "device_b_${System.nanoTime()}").apply { mkdirs() }
+    val ctxA = object : android.content.ContextWrapper(baseApp) {
+      override fun getFilesDir(): java.io.File = dirA
+    }
+    val ctxB = object : android.content.ContextWrapper(baseApp) {
+      override fun getFilesDir(): java.io.File = dirB
+    }
+    try {
+      val mgrA = CertificateManager(ctxA)
+      val mgrB = CertificateManager(ctxB)
+      val certA = mgrA.ensureUniqueIdentityForPairing().getCertificate(CertificateManager.KEY_ALIAS) as java.security.cert.X509Certificate
+      val certB = mgrB.ensureUniqueIdentityForPairing().getCertificate(CertificateManager.KEY_ALIAS) as java.security.cert.X509Certificate
+
+      val tagA = mgrA.getClientDeviceTag()
+      val tagB = mgrB.getClientDeviceTag()
+      assertEquals(8, tagA.length)
+      assertEquals(8, tagB.length)
+      assertTrue("Expected distinct per-device certificate tags, got $tagA vs $tagB", tagA != tagB)
+      assertTrue(certA.subjectX500Principal.name.contains("YV-TV Remote-$tagA"))
+      assertTrue(certB.subjectX500Principal.name.contains("YV-TV Remote-$tagB"))
+      assertTrue(certA.subjectX500Principal.name != certB.subjectX500Principal.name)
+
+      // Calling ensureUniqueIdentityForPairing again must keep the same identity (no forced re-pair)
+      val certA2 = mgrA.ensureUniqueIdentityForPairing().getCertificate(CertificateManager.KEY_ALIAS) as java.security.cert.X509Certificate
+      assertEquals(certA.serialNumber, certA2.serialNumber)
+    } finally {
+      dirA.deleteRecursively()
+      dirB.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `pressing any remote key after multi-device pause auto-reconnects silently without pairing prompt and delivers command`() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val certManager = CertificateManager(app)
+    val serverKeyStore = certManager.ensureClientIdentity()
+    val kmf =
+      javax.net.ssl.KeyManagerFactory.getInstance(
+        javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
+      ).apply {
+        init(serverKeyStore, "yvtv_remote_keystore_pass".toCharArray())
+      }
+    val trustAll =
+      object : javax.net.ssl.X509TrustManager {
+        override fun checkClientTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+        override fun checkServerTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+      }
+    val serverSslContext =
+      javax.net.ssl.SSLContext.getInstance("TLS").apply {
+        init(kmf.keyManagers, arrayOf<javax.net.ssl.TrustManager>(trustAll), null)
+      }
+    val serverSocket =
+      (serverSslContext.serverSocketFactory.createServerSocket(0) as javax.net.ssl.SSLServerSocket)
+        .apply { needClientAuth = false }
+
+    val acceptCount = java.util.concurrent.atomic.AtomicInteger(0)
+    val keyReceivedLatch = java.util.concurrent.CountDownLatch(1)
+    val receivedKey = java.util.concurrent.atomic.AtomicReference<com.example.proto.remote.RemoteKeyCode?>()
+
+    val serverThread =
+      Thread {
+        try {
+          // Simulate 3 rapid multi-device evictions to trigger background auto-reconnect pause
+          repeat(3) {
+            val client = serverSocket.accept() as javax.net.ssl.SSLSocket
+            acceptCount.incrementAndGet()
+            client.startHandshake()
+            val configureMsg =
+              com.example.proto.remote.RemoteMessage.newBuilder()
+                .setRemoteConfigure(
+                  com.example.proto.remote.RemoteConfigure.newBuilder().setCode1(622).build()
+                )
+                .build()
+            com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, configureMsg)
+            Thread.sleep(60L)
+            client.close()
+          }
+          // 4th connection stays alive and expects the key press command immediately
+          val client = serverSocket.accept() as javax.net.ssl.SSLSocket
+          acceptCount.incrementAndGet()
+          client.startHandshake()
+          val configureMsg =
+            com.example.proto.remote.RemoteMessage.newBuilder()
+              .setRemoteConfigure(
+                com.example.proto.remote.RemoteConfigure.newBuilder().setCode1(622).build()
+              )
+              .build()
+          com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, configureMsg)
+          val input = client.inputStream
+          while (!client.isClosed) {
+            val frame = com.example.remote.protocol.DelimitedStreamHelper.readDelimitedBytes(input) ?: break
+            val msg = com.example.proto.remote.RemoteMessage.parseFrom(frame)
+            if (msg.hasRemoteKeyInject()) {
+              receivedKey.set(msg.remoteKeyInject.keyCode)
+              keyReceivedLatch.countDown()
+              break
+            }
+          }
+          client.close()
+        } catch (_: Throwable) {
+        } finally {
+          try {
+            serverSocket.close()
+          } catch (_: Exception) {
+          }
+        }
+      }.apply { start() }
+
+    fun pumpMainLooperUntil(timeoutMs: Long = 10_000L, condition: () -> Boolean): Boolean {
+      val mainLooperShadow = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+      val deadline = System.currentTimeMillis() + timeoutMs
+      while (System.currentTimeMillis() < deadline) {
+        mainLooperShadow.idle()
+        if (condition()) return true
+        Thread.sleep(25L)
+        mainLooperShadow.idleFor(java.time.Duration.ofMillis(25))
+      }
+      mainLooperShadow.idle()
+      return condition()
+    }
+
+    val viewModel = com.example.remote.ui.RemoteViewModel(app)
+    viewModel.connectManualIp("127.0.0.1", serverSocket.localPort, "Shared Family TV")
+
+    assertTrue(
+      "Expected background pause after 3 rapid drops, got ${viewModel.uiState.value.connectionStatus}",
+      pumpMainLooperUntil {
+        val status = viewModel.uiState.value.connectionStatus
+        status is com.example.remote.ui.ConnectionStatus.Error && status.isRapidDropLoop
+      },
+    )
+
+    // User presses Volume Up directly while paused — must silently reconnect & execute key WITHOUT pairing!
+    viewModel.sendKey(com.example.proto.remote.RemoteKeyCode.KEYCODE_VOLUME_UP)
+
+    assertTrue(
+      "Expected Connected after pressing key from paused state, got ${viewModel.uiState.value.connectionStatus}",
+      pumpMainLooperUntil {
+        viewModel.uiState.value.connectionStatus is com.example.remote.ui.ConnectionStatus.Connected
+      },
+    )
+    assertFalse(
+      "Must never ask for pairing code again on an already-paired TV",
+      viewModel.uiState.value.connectionStatus is com.example.remote.ui.ConnectionStatus.Pairing,
+    )
+    assertTrue(
+      "Expected KEYCODE_VOLUME_UP delivered to TV after auto-reconnect",
+      keyReceivedLatch.await(3, java.util.concurrent.TimeUnit.SECONDS),
+    )
+    assertEquals(com.example.proto.remote.RemoteKeyCode.KEYCODE_VOLUME_UP, receivedKey.get())
+    assertEquals(4, acceptCount.get())
+
+    viewModel.disconnect()
+    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+    serverThread.join(1_500L)
+  }
+
+  @Test
+  fun `in-app search button and TV IME search request both automatically show keyboard sheet`() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val certManager = CertificateManager(app)
+    val serverKeyStore = certManager.ensureClientIdentity()
+    val kmf =
+      javax.net.ssl.KeyManagerFactory.getInstance(
+        javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
+      ).apply {
+        init(serverKeyStore, "yvtv_remote_keystore_pass".toCharArray())
+      }
+    val trustAll =
+      object : javax.net.ssl.X509TrustManager {
+        override fun checkClientTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+        override fun checkServerTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+      }
+    val serverSslContext =
+      javax.net.ssl.SSLContext.getInstance("TLS").apply {
+        init(kmf.keyManagers, arrayOf<javax.net.ssl.TrustManager>(trustAll), null)
+      }
+    val serverSocket =
+      (serverSslContext.serverSocketFactory.createServerSocket(0) as javax.net.ssl.SSLServerSocket)
+        .apply { needClientAuth = false }
+
+    val sendImeRequestLatch = java.util.concurrent.CountDownLatch(1)
+    val searchKeyReceivedLatch = java.util.concurrent.CountDownLatch(1)
+    val keepAliveLatch = java.util.concurrent.CountDownLatch(1)
+
+    val serverThread =
+      Thread {
+        try {
+          val client = serverSocket.accept() as javax.net.ssl.SSLSocket
+          client.startHandshake()
+          val configureMsg =
+            com.example.proto.remote.RemoteMessage.newBuilder()
+              .setRemoteConfigure(
+                com.example.proto.remote.RemoteConfigure.newBuilder().setCode1(622).build()
+              )
+              .build()
+          com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, configureMsg)
+
+          val reader =
+            Thread {
+              try {
+                val input = client.inputStream
+                while (!client.isClosed) {
+                  val frame = com.example.remote.protocol.DelimitedStreamHelper.readDelimitedBytes(input) ?: break
+                  val msg = com.example.proto.remote.RemoteMessage.parseFrom(frame)
+                  if (msg.hasRemoteKeyInject() &&
+                    msg.remoteKeyInject.keyCode == com.example.proto.remote.RemoteKeyCode.KEYCODE_SEARCH
+                  ) {
+                    searchKeyReceivedLatch.countDown()
+                  }
+                }
+              } catch (_: Throwable) {
+              }
+            }.apply { start() }
+
+          if (sendImeRequestLatch.await(3, java.util.concurrent.TimeUnit.SECONDS)) {
+            val imeAppMsg =
+              com.example.proto.remote.RemoteMessage.newBuilder()
+                .setRemoteImeKeyInject(
+                  com.example.proto.remote.RemoteImeKeyInject.newBuilder()
+                    .setAppInfo(
+                      com.example.proto.remote.RemoteAppInfo.newBuilder()
+                        .setCounter(1)
+                        .setAppPackage("com.google.android.youtube.tv")
+                        .setLabel("YouTube")
+                        .build()
+                    )
+                    .setTextFieldStatus(
+                      com.example.proto.remote.RemoteTextFieldStatus.newBuilder()
+                        .setCounterField(1)
+                        .setValue("")
+                        .setLabel("Search YouTube")
+                        .build()
+                    )
+                    .build()
+                )
+                .build()
+            com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, imeAppMsg)
+
+            val imeShowMsg =
+              com.example.proto.remote.RemoteMessage.newBuilder()
+                .setRemoteImeShowRequest(
+                  com.example.proto.remote.RemoteImeShowRequest.newBuilder()
+                    .setRemoteTextFieldStatus(
+                      com.example.proto.remote.RemoteTextFieldStatus.newBuilder()
+                        .setCounterField(1)
+                        .setValue("")
+                        .setLabel("Search YouTube")
+                        .build()
+                    )
+                    .build()
+                )
+                .build()
+            com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, imeShowMsg)
+          }
+
+          keepAliveLatch.await(3, java.util.concurrent.TimeUnit.SECONDS)
+          client.close()
+          reader.join(500L)
+        } catch (_: Throwable) {
+        } finally {
+          try {
+            serverSocket.close()
+          } catch (_: Exception) {
+          }
+        }
+      }.apply { start() }
+
+    fun pumpMainLooperUntil(timeoutMs: Long = 5_000L, condition: () -> Boolean): Boolean {
+      val mainLooperShadow = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+      val deadline = System.currentTimeMillis() + timeoutMs
+      while (System.currentTimeMillis() < deadline) {
+        mainLooperShadow.idle()
+        if (condition()) return true
+        Thread.sleep(25L)
+        mainLooperShadow.idleFor(java.time.Duration.ofMillis(25))
+      }
+      mainLooperShadow.idle()
+      return condition()
+    }
+
+    val viewModel = com.example.remote.ui.RemoteViewModel(app)
+    viewModel.connectManualIp("127.0.0.1", serverSocket.localPort, "Living Room TV")
+    assertTrue(
+      pumpMainLooperUntil {
+        viewModel.uiState.value.connectionStatus is com.example.remote.ui.ConnectionStatus.Connected &&
+          !viewModel.uiState.value.showConnectionHub
+      },
+    )
+
+    // 1) Clicking the Search icon in YV-TV Remote opens keyboard immediately and sends KEYCODE_SEARCH
+    assertFalse(viewModel.uiState.value.showKeyboardSheet)
+    viewModel.openSearchWithKeyboard()
+    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+    assertTrue("Expected keyboard sheet open on search icon click", viewModel.uiState.value.showKeyboardSheet)
+    assertTrue(
+      "Expected KEYCODE_SEARCH sent to TV",
+      searchKeyReceivedLatch.await(2, java.util.concurrent.TimeUnit.SECONDS),
+    )
+
+    // Dismiss keyboard sheet
+    viewModel.openKeyboardSheet(false)
+    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+    assertFalse(viewModel.uiState.value.showKeyboardSheet)
+
+    // 2) Clicking a search box inside a TV app triggers RemoteImeShowRequest -> auto-opens keyboard sheet!
+    sendImeRequestLatch.countDown()
+    assertTrue(
+      "Expected keyboard sheet to auto-open on TV RemoteImeShowRequest",
+      pumpMainLooperUntil {
+        viewModel.uiState.value.tvImeState.isImeRequested && viewModel.uiState.value.showKeyboardSheet
+      },
+    )
+    assertEquals("YouTube", viewModel.uiState.value.tvImeState.appLabel)
+
+    keepAliveLatch.countDown()
+    viewModel.disconnect()
+    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+    serverThread.join(1_500L)
+  }
 }
+
 
 

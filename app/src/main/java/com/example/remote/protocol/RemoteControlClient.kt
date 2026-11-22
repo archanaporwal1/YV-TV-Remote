@@ -87,6 +87,7 @@ class RemoteControlClient(
     data object Connected : SessionEvent()
     data class PairingRequired(
       val reason: String,
+      val isExplicitTlsRejection: Boolean = true,
       val eventId: Long = nextEventId(),
     ) : SessionEvent()
 
@@ -199,10 +200,18 @@ class RemoteControlClient(
         } catch (e: SSLException) {
           runCatching { sslSocket?.close() }
           runCatching { plainSocket?.close() }
-          _sessionEvent.value =
-            SessionEvent.PairingRequired(
-              "TV requires pairing before remote control access (${e.message ?: "TLS rejected"})."
-            )
+          if (isCertificateOrHandshakeError(e)) {
+            _sessionEvent.value =
+              SessionEvent.PairingRequired(
+                reason = "TV requires pairing before remote control access (${e.message ?: "TLS rejected"}).",
+                isExplicitTlsRejection = true,
+              )
+          } else {
+            _sessionEvent.value =
+              SessionEvent.ConnectionLost(
+                e.message ?: "TV connection interrupted during handshake.",
+              )
+          }
           false
         } catch (e: kotlinx.coroutines.CancellationException) {
           runCatching { sslSocket?.close() }
@@ -326,9 +335,13 @@ class RemoteControlClient(
         when {
           message.hasRemoteConfigure() -> {
             negotiatedFeatures = negotiateFeatureCode(message.remoteConfigure.code1)
+            var configureOk = true
             if (!sentConfigureReply) {
               sentConfigureReply = true
-              sendConfigureReply(negotiatedFeatures, sslSocket)
+              configureOk = sendConfigureReply(negotiatedFeatures, sslSocket)
+            }
+            if (!configureOk || socket !== sslSocket) {
+              break
             }
             if (_sessionEvent.value != SessionEvent.Connected) {
               _sessionEvent.value = SessionEvent.Connected
@@ -338,9 +351,13 @@ class RemoteControlClient(
             val serverActive = message.remoteSetActive.active
             val negotiatedActive =
               if (serverActive > 0) negotiateFeatureCode(serverActive) else negotiatedFeatures
+            var activeOk = true
             if (!repliedToServerSetActive) {
               repliedToServerSetActive = true
-              sendSetActiveReply(negotiatedActive, sslSocket)
+              activeOk = sendSetActiveReply(negotiatedActive, sslSocket)
+            }
+            if (!activeOk || socket !== sslSocket) {
+              break
             }
             if (_sessionEvent.value != SessionEvent.Connected) {
               _sessionEvent.value = SessionEvent.Connected
@@ -443,24 +460,26 @@ class RemoteControlClient(
         if (!hasReceivedMessage && _sessionEvent.value == SessionEvent.Connecting) {
           _sessionEvent.value =
             SessionEvent.PairingRequired(
-              "TV closed the remote channel before handshake completed. Starting pairing..."
+              reason = "TV closed the remote channel before handshake completed.",
+              isExplicitTlsRejection = false,
             )
         } else if (
           _sessionEvent.value == SessionEvent.Connected ||
           _sessionEvent.value == SessionEvent.Connecting
         ) {
           _sessionEvent.value =
-            SessionEvent.ConnectionLost("TV connection closed while idle or switching apps.")
+            SessionEvent.ConnectionLost("TV connection closed while idle or switching devices.")
         }
       }
     } catch (ce: kotlinx.coroutines.CancellationException) {
       throw ce
     } catch (e: SSLException) {
       if (sessionScope.isActive && socket === sslSocket) {
-        if (isCertificateOrHandshakeError(e) || !hasReceivedMessage) {
+        if (isCertificateOrHandshakeError(e)) {
           _sessionEvent.value =
             SessionEvent.PairingRequired(
-              "Certificate not trusted by TV (${e.message ?: "SSLException"}). Starting pairing..."
+              reason = "Certificate not trusted by TV (${e.message ?: "SSLException"}).",
+              isExplicitTlsRejection = true,
             )
         } else {
           _sessionEvent.value =
@@ -478,8 +497,10 @@ class RemoteControlClient(
     }
   }
 
-  private suspend fun sendConfigureReply(featureCode: Int, targetSocket: SSLSocket) {
-    val modelName = Build.MODEL.orEmpty().ifBlank { "Android" }
+  private suspend fun sendConfigureReply(featureCode: Int, targetSocket: SSLSocket): Boolean {
+    val rawModel = Build.MODEL.orEmpty().ifBlank { "Android" }
+    val deviceTag = runCatching { certificateManager.getClientDeviceTag().take(4) }.getOrDefault("")
+    val modelName = if (deviceTag.isNotEmpty()) "$rawModel-$deviceTag" else rawModel
     val vendorName = Build.MANUFACTURER.orEmpty().ifBlank { "Android" }
     val deviceInfo =
       RemoteDeviceInfo.newBuilder()
@@ -500,10 +521,10 @@ class RemoteControlClient(
             .build()
         )
         .build()
-    sendRemoteMessage(configureReply, expectedSocket = targetSocket)
+    return sendRemoteMessage(configureReply, expectedSocket = targetSocket)
   }
 
-  private suspend fun sendSetActiveReply(activeFeatures: Int, targetSocket: SSLSocket) {
+  private suspend fun sendSetActiveReply(activeFeatures: Int, targetSocket: SSLSocket): Boolean {
     val setActiveReply =
       RemoteMessage.newBuilder()
         .setRemoteSetActive(
@@ -512,7 +533,7 @@ class RemoteControlClient(
             .build()
         )
         .build()
-    sendRemoteMessage(setActiveReply, expectedSocket = targetSocket)
+    return sendRemoteMessage(setActiveReply, expectedSocket = targetSocket)
   }
 
   suspend fun sendKey(
@@ -773,17 +794,49 @@ class RemoteControlClient(
     }
 
     fun isCertificateOrHandshakeError(error: SSLException): Boolean {
-      if (error is SSLHandshakeException) return true
-      val message = error.message?.uppercase().orEmpty()
-      return message.contains("CERTIFICATE_UNKNOWN") ||
-        message.contains("BAD_CERTIFICATE") ||
-        message.contains("UNKNOWN_CA") ||
-        message.contains("CERTIFICATE_REQUIRED") ||
-        message.contains("CERTIFICATE_REVOKED") ||
-        message.contains("CERTIFICATE_EXPIRED") ||
-        message.contains("SSLV3_ALERT") ||
-        message.contains("HANDSHAKE") ||
-        message.contains("ALERT")
+      val chainMessages =
+        buildString {
+          var current: Throwable? = error
+          var depth = 0
+          while (current != null && depth < 5) {
+            append(' ')
+            append(current.message?.uppercase().orEmpty())
+            current = current.cause
+            depth++
+          }
+        }
+      val hasExplicitTlsAlert =
+        chainMessages.contains("CERTIFICATE_UNKNOWN") ||
+          chainMessages.contains("BAD_CERTIFICATE") ||
+          chainMessages.contains("UNKNOWN_CA") ||
+          chainMessages.contains("CERTIFICATE_REQUIRED") ||
+          chainMessages.contains("CERTIFICATE_REVOKED") ||
+          chainMessages.contains("CERTIFICATE_EXPIRED") ||
+          chainMessages.contains("SSLV3_ALERT") ||
+          chainMessages.contains("TLSV1_ALERT") ||
+          chainMessages.contains("HANDSHAKE_FAILURE") ||
+          chainMessages.contains("ALERT")
+      if (hasExplicitTlsAlert) return true
+
+      // Transient network/socket resets (common when a second device takes over the TV slot)
+      // must NOT trigger a pairing code prompt even when wrapped in SSLHandshakeException.
+      val isTransientTransportFailure =
+        chainMessages.contains("CONNECTION RESET") ||
+          chainMessages.contains("BROKEN PIPE") ||
+          chainMessages.contains("CONNECTION ABORT") ||
+          chainMessages.contains("SOCKET CLOSED") ||
+          chainMessages.contains("TIMED OUT") ||
+          chainMessages.contains("CONNECTION CLOSED BY PEER") ||
+          chainMessages.contains("REMOTE HOST TERMINATED") ||
+          chainMessages.contains("REMOTE HOST CLOSED") ||
+          chainMessages.contains("CLOSED CONNECTION") ||
+          chainMessages.contains("EOF") ||
+          error.cause is SocketTimeoutException ||
+          error.cause is java.io.EOFException ||
+          error.cause is java.net.SocketException
+      if (isTransientTransportFailure) return false
+
+      return error is SSLHandshakeException || chainMessages.contains("HANDSHAKE")
     }
 
     fun charToRemoteKeyCode(ch: Char): RemoteKeyCode? {

@@ -351,6 +351,7 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
             onOpenCustomizeUi = { viewModel.openCustomizeUiSheet(true) },
             onOpenSettings = { viewModel.openSettingsSheet(true) },
             onOpenKeyboard = { viewModel.openKeyboardSheet(true) },
+            onOpenSearch = { viewModel.openSearchWithKeyboard() },
             onOpenVoiceInput = triggerVoiceInputFlow,
             onTriggerTvVoiceAssistant = { viewModel.triggerTvVoiceAssistant() },
             onSwitchInputMode = { viewModel.setInputMode(it) },
@@ -646,6 +647,7 @@ fun RemoteControlScreen(
   onOpenCustomizeUi: () -> Unit,
   onOpenSettings: () -> Unit,
   onOpenKeyboard: () -> Unit,
+  onOpenSearch: () -> Unit = onOpenKeyboard,
   onOpenVoiceInput: () -> Unit = {},
   onTriggerTvVoiceAssistant: () -> Unit = {},
   onSwitchInputMode: (RemoteInputMode) -> Unit,
@@ -732,7 +734,7 @@ fun RemoteControlScreen(
                 showQuickSearchBar = uiPrefs.showQuickSearchBar,
                 onSwitch = onSwitchInputMode,
                 onOpenKeyboard = onOpenKeyboard,
-                onOpenSearch = { onSendKey(RemoteKeyCode.KEYCODE_SEARCH, FeedbackCue.CONFIRM_CHIME) },
+                onOpenSearch = onOpenSearch,
               )
               VoiceCommandBar(
                 isListening = uiState.voiceState.isListening,
@@ -806,7 +808,7 @@ fun RemoteControlScreen(
               showQuickSearchBar = uiPrefs.showQuickSearchBar,
               onSwitch = onSwitchInputMode,
               onOpenKeyboard = onOpenKeyboard,
-              onOpenSearch = { onSendKey(RemoteKeyCode.KEYCODE_SEARCH, FeedbackCue.CONFIRM_CHIME) },
+              onOpenSearch = onOpenSearch,
             )
             VoiceCommandBar(
               isListening = uiState.voiceState.isListening,

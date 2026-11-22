@@ -130,6 +130,7 @@ class PairingClient(
       var plainSocket: java.net.Socket? = null
       var socket: SSLSocket? = null
       try {
+        certificateManager.ensureUniqueIdentityForPairing()
         val tls = certificateManager.createTlsSessionContext()
         plainSocket =
           WifiNetworkBinder.createPlainSocket(appContext, host).apply {
@@ -154,10 +155,14 @@ class PairingClient(
         val output = socket.outputStream
 
         // Step 1: PairingRequest -> PairingRequestAck
-        val deviceName =
+        val baseDeviceName =
           listOfNotNull(Build.MANUFACTURER, Build.MODEL)
             .joinToString(" ")
             .ifBlank { "YV-TV Remote" }
+        val deviceTag = certificateManager.getClientDeviceTag().take(4)
+        val deviceName =
+          if (deviceTag.isNotEmpty()) "$baseDeviceName ($deviceTag)"
+          else baseDeviceName
 
         val pairingRequest =
           PairingMessage.newBuilder()

@@ -30,11 +30,57 @@ class CertificateManager(context: Context) {
 
   val keystoreFile: File = File(context.filesDir, KEYSTORE_FILE_NAME)
   private val bcProvider = BouncyCastleProvider()
+  private var cachedKeyStore: KeyStore? = null
+  private var cachedDeviceTag: String? = null
 
   @Synchronized
-  fun ensureClientIdentity(): KeyStore {
+  fun ensureClientIdentity(): KeyStore = ensureClientIdentityInternal(forceRegenerate = false)
+
+  /**
+   * Ensures this device has a unique per-device certificate Subject CN before pairing.
+   * Multiple phones sharing the same Android TV must never share the identical Subject DN
+   * ("CN=YV-TV Remote"), otherwise the TV's KeyStore overwrites the previous device's
+   * trusted certificate and triggers repeated pairing prompts.
+   */
+  @Synchronized
+  fun ensureUniqueIdentityForPairing(): KeyStore {
+    val existing = ensureClientIdentityInternal(forceRegenerate = false)
+    val cert = existing.getCertificate(KEY_ALIAS) as? X509Certificate
+    val subjectDn = cert?.subjectX500Principal?.name.orEmpty()
+    val hasUniqueSuffix = Regex("CN=YV-TV Remote-[0-9A-Fa-f]{8}\\b").containsMatchIn(subjectDn)
+    return if (hasUniqueSuffix) {
+      existing
+    } else {
+      ensureClientIdentityInternal(forceRegenerate = true)
+    }
+  }
+
+  /**
+   * Returns the short 8-hex unique tag embedded in this device's client certificate CN,
+   * or an empty string for legacy pre-upgrade certificates.
+   */
+  @Synchronized
+  fun getClientDeviceTag(): String {
+    cachedDeviceTag?.let { return it }
+    val ks = ensureClientIdentityInternal(forceRegenerate = false)
+    val cert = ks.getCertificate(KEY_ALIAS) as? X509Certificate ?: return ""
+    val subjectDn = cert.subjectX500Principal?.name.orEmpty()
+    val match = Regex("CN=YV-TV Remote-([0-9A-Fa-f]{8})\\b").find(subjectDn)
+    val tag = match?.groupValues?.getOrNull(1)?.uppercase().orEmpty()
+    cachedDeviceTag = tag
+    return tag
+  }
+
+  private fun ensureClientIdentityInternal(forceRegenerate: Boolean): KeyStore {
+    if (!forceRegenerate && cachedKeyStore != null && keystoreFile.exists() && keystoreFile.length() > 0L) {
+      return cachedKeyStore!!
+    }
+    if (forceRegenerate) {
+      cachedKeyStore = null
+      cachedDeviceTag = null
+    }
     val keyStore = KeyStore.getInstance(KEYSTORE_TYPE)
-    if (keystoreFile.exists() && keystoreFile.length() > 0L) {
+    if (!forceRegenerate && keystoreFile.exists() && keystoreFile.length() > 0L) {
       try {
         keystoreFile.inputStream().use { input ->
           keyStore.load(input, KEYSTORE_PASSWORD)
@@ -42,6 +88,7 @@ class CertificateManager(context: Context) {
         val cert = keyStore.getCertificate(KEY_ALIAS) as? X509Certificate
         val key = keyStore.getKey(KEY_ALIAS, KEYSTORE_PASSWORD) as? PrivateKey
         if (cert != null && key != null) {
+          cachedKeyStore = keyStore
           return keyStore
         }
       } catch (_: Exception) {
@@ -58,7 +105,10 @@ class CertificateManager(context: Context) {
     val notAfter = Date(now + 20L * 365L * 86_400_000L) // 20 years validity
     val serial = BigInteger(64, SecureRandom()).abs().max(BigInteger.ONE)
 
-    val subject = X500Name("CN=YV-TV Remote, O=YourView, OU=yourview.in")
+    val deviceTagBytes = ByteArray(4)
+    SecureRandom().nextBytes(deviceTagBytes)
+    val deviceTag = deviceTagBytes.joinToString("") { "%02X".format(it) }
+    val subject = X500Name("CN=YV-TV Remote-$deviceTag, O=YourView, OU=yourview.in")
     val certBuilder =
       JcaX509v3CertificateBuilder(
         subject,
@@ -98,6 +148,8 @@ class CertificateManager(context: Context) {
       }
       tempFile.delete()
     }
+    cachedKeyStore = keyStore
+    cachedDeviceTag = deviceTag
     return keyStore
   }
 

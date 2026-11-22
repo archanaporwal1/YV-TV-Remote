@@ -80,6 +80,10 @@ android {
           "--add-opens=java.base/java.net=ALL-UNNAMED",
           "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED",
         )
+        it.systemProperty(
+          "robolectric.dependency.repo.url",
+          "https://maven-central.storage-download.googleapis.com/maven2",
+        )
       }
     }
   }

@@ -2278,6 +2278,214 @@ class ExampleRobolectricTest {
     org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
     serverThread.join(1_500L)
   }
+
+  @Test
+  fun `ssl credentials DataStore encrypts payloads at rest, persists paired TV credentials across reloads, and updates DHCP IP`() {
+    kotlinx.coroutines.runBlocking {
+      val context = ApplicationProvider.getApplicationContext<Context>()
+      val store1 = com.example.remote.data.SslCredentialsDataStore(context)
+      store1.clearAll()
+
+      val fakePkcs12 = "PRIVATE_KEY_MATERIAL_BYTES_0123456789".toByteArray()
+      val identity =
+        com.example.remote.data.StoredDeviceSslIdentity(
+          deviceTag = "A1B2C3D4",
+          subjectCn = "CN=YV-TV Remote-A1B2C3D4, O=YourView, OU=yourview.in",
+          clientCertFingerprintSha256 = "11223344556677889900AABBCCDDEEFF11223344556677889900AABBCCDDEEFF",
+          pkcs12Bytes = fakePkcs12,
+          createdAtMs = 1_700_000_000_000L,
+        )
+      store1.saveDeviceIdentity(identity)
+
+      val pairedCred =
+        com.example.remote.data.PairedTvSslCredential(
+          tvKey = "192.168.1.42",
+          ipAddress = "192.168.1.42",
+          controlPort = 6466,
+          serverName = "Living Room OLED TV",
+          serverCertFingerprintSha256 = "AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899",
+          clientDeviceTag = "A1B2C3D4",
+          clientCertFingerprintSha256 = identity.clientCertFingerprintSha256,
+          pairingTokenHash = "SECRET_PAIRING_TOKEN_HASH_XYZ987",
+          pkcs12Bytes = fakePkcs12,
+          pairedAtMs = 1_700_000_001_000L,
+          lastConnectedAtMs = 1_700_000_001_000L,
+        )
+      store1.savePairedCredential(pairedCred)
+
+      // Raw DataStore file on disk MUST be AES-GCM encrypted (no plaintext secrets or IP/names)
+      assertTrue("Expected DataStore file to exist on disk", store1.dataStoreFile.exists())
+      val rawDiskText = store1.dataStoreFile.readBytes().toString(Charsets.ISO_8859_1)
+      assertFalse("Raw DataStore must NOT contain plaintext private key bytes", rawDiskText.contains("PRIVATE_KEY_MATERIAL"))
+      assertFalse("Raw DataStore must NOT contain plaintext pairing token", rawDiskText.contains("SECRET_PAIRING_TOKEN_HASH_XYZ987"))
+      assertFalse("Raw DataStore must NOT contain plaintext TV name", rawDiskText.contains("Living Room OLED TV"))
+
+      // Fresh instance reloads exact encrypted identity & paired TV credentials
+      val store2 = com.example.remote.data.SslCredentialsDataStore(context)
+      val loadedIdentity = store2.getDeviceIdentity()
+      assertNotNull(loadedIdentity)
+      assertEquals("A1B2C3D4", loadedIdentity!!.deviceTag)
+      assertTrue(fakePkcs12.contentEquals(loadedIdentity.pkcs12Bytes))
+
+      val byHost = store2.getPairedCredentialByHost("192.168.1.42")
+      assertNotNull(byHost)
+      assertEquals("Living Room OLED TV", byHost!!.serverName)
+      assertEquals("SECRET_PAIRING_TOKEN_HASH_XYZ987", byHost.pairingTokenHash)
+      assertTrue(fakePkcs12.contentEquals(byHost.pkcs12Bytes))
+
+      val byFingerprint =
+        store2.getPairedCredentialByServerFingerprint(pairedCred.serverCertFingerprintSha256)
+      assertNotNull(byFingerprint)
+      assertEquals("192.168.1.42", byFingerprint!!.ipAddress)
+
+      // DHCP IP migration preserves paired credentials under the TV's new IP
+      store2.updatePairedHostAddress("192.168.1.42", "192.168.1.99", 6466)
+      org.junit.Assert.assertNull(store2.getPairedCredentialByHost("192.168.1.42"))
+      val migrated = store2.getPairedCredentialByHost("192.168.1.99")
+      assertNotNull(migrated)
+      assertEquals("SECRET_PAIRING_TOKEN_HASH_XYZ987", migrated!!.pairingTokenHash)
+      assertTrue(store2.hasPairedCredential("192.168.1.99", pairedCred.serverCertFingerprintSha256))
+    }
+  }
+
+  @Test
+  fun `certificate manager migrates legacy pkcs12 file into encrypted DataStore without losing identity`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val store = com.example.remote.data.SslCredentialsDataStore(context)
+    kotlinx.coroutines.runBlocking { store.clearAll() }
+
+    // Create a valid identity, export it to the legacy .p12 path, then clear DataStore
+    val seedManager = CertificateManager(context, store)
+    val seedKeyStore = seedManager.ensureClientIdentity()
+    val expectedPubKey = seedManager.getClientRsaPublicKey()
+    val legacyFile = java.io.File(context.filesDir, CertificateManager.KEYSTORE_FILE_NAME)
+    java.io.FileOutputStream(legacyFile).use { out ->
+      seedKeyStore.store(out, "yvtv_remote_keystore_pass".toCharArray())
+    }
+    assertTrue(legacyFile.exists())
+    kotlinx.coroutines.runBlocking { store.clearAll() }
+
+    // Fresh CertificateManager must migrate legacy .p12 into encrypted DataStore and delete legacy file
+    val migratedManager = CertificateManager(context, store)
+    val migratedPubKey = migratedManager.getClientRsaPublicKey()
+    assertEquals(expectedPubKey.modulus, migratedPubKey.modulus)
+    assertEquals(expectedPubKey.publicExponent, migratedPubKey.publicExponent)
+    assertFalse("Legacy plaintext .p12 file should be deleted after migration", legacyFile.exists())
+    assertNotNull(
+      "Migrated identity must now live in encrypted DataStore",
+      kotlinx.coroutines.runBlocking { store.getDeviceIdentity() },
+    )
+  }
+
+  @Test
+  fun `previously paired TV with stored DataStore SSL credential reconnects automatically without asking for pairing code`() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val store = com.example.remote.data.SslCredentialsDataStore(app)
+    kotlinx.coroutines.runBlocking { store.clearAll() }
+
+    // Pre-populate encrypted DataStore as if this TV was paired in a previous session
+    val certManager = CertificateManager(app, store)
+    val serverKeyStore = certManager.ensureClientIdentity()
+    val savedCred =
+      certManager.savePairedTvCredential(
+        ipAddress = "127.0.0.1",
+        controlPort = 6466,
+        serverName = "Bedroom Android TV",
+        serverCertFingerprintSha256 = "DEADBEAF00112233445566778899AABBCCDDEEFF00112233445566778899AABB",
+        pairingTokenHash = "PAIRED_SESSION_TOKEN_HASH",
+      )
+    assertTrue(certManager.hasStoredCredentialForHost("127.0.0.1"))
+    assertEquals("PAIRED_SESSION_TOKEN_HASH", savedCred.pairingTokenHash)
+
+    val kmf =
+      javax.net.ssl.KeyManagerFactory.getInstance(
+        javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
+      ).apply {
+        init(serverKeyStore, "yvtv_remote_keystore_pass".toCharArray())
+      }
+    val trustAll =
+      object : javax.net.ssl.X509TrustManager {
+        override fun checkClientTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+        override fun checkServerTrusted(
+          chain: Array<out java.security.cert.X509Certificate>?,
+          authType: String?,
+        ) {}
+        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+      }
+    val serverSslContext =
+      javax.net.ssl.SSLContext.getInstance("TLS").apply {
+        init(kmf.keyManagers, arrayOf<javax.net.ssl.TrustManager>(trustAll), null)
+      }
+    val serverSocket =
+      (serverSslContext.serverSocketFactory.createServerSocket(0) as javax.net.ssl.SSLServerSocket)
+        .apply { needClientAuth = false }
+
+    val attemptCount = java.util.concurrent.atomic.AtomicInteger(0)
+    val keepAliveLatch = java.util.concurrent.CountDownLatch(1)
+    val serverThread =
+      Thread {
+        try {
+          while (!serverSocket.isClosed && attemptCount.get() < 2) {
+            val client = serverSocket.accept() as javax.net.ssl.SSLSocket
+            val idx = attemptCount.incrementAndGet()
+            client.startHandshake()
+            if (idx == 1) {
+              // Simulate transient early drop (e.g. TV busy or another device briefly active)
+              client.close()
+            } else {
+              val cfg =
+                com.example.proto.remote.RemoteMessage.newBuilder()
+                  .setRemoteConfigure(
+                    com.example.proto.remote.RemoteConfigure.newBuilder().setCode1(622).build()
+                  )
+                  .build()
+              com.example.remote.protocol.DelimitedStreamHelper.writeMessage(client.outputStream, cfg)
+              keepAliveLatch.await(3, java.util.concurrent.TimeUnit.SECONDS)
+              client.close()
+            }
+          }
+        } catch (_: Throwable) {
+        } finally {
+          try { serverSocket.close() } catch (_: Exception) {}
+        }
+      }.apply { start() }
+
+    fun pumpMainLooperUntil(timeoutMs: Long = 6_000L, condition: () -> Boolean): Boolean {
+      val mainLooperShadow = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+      val deadline = System.currentTimeMillis() + timeoutMs
+      while (System.currentTimeMillis() < deadline) {
+        mainLooperShadow.idle()
+        if (condition()) return true
+        Thread.sleep(25L)
+        mainLooperShadow.idleFor(java.time.Duration.ofMillis(25))
+      }
+      mainLooperShadow.idle()
+      return condition()
+    }
+
+    // Notice: SavedConnections SharedPreferences is EMPTY, ONLY encrypted DataStore has the TV credential!
+    val viewModel = com.example.remote.ui.RemoteViewModel(app)
+    viewModel.connectManualIp("127.0.0.1", serverSocket.localPort, "Bedroom Android TV")
+
+    assertTrue(
+      "Expected previously paired TV (from DataStore) to auto-reconnect without pairing prompt, got ${viewModel.uiState.value.connectionStatus}",
+      pumpMainLooperUntil {
+        assertFalse(
+          "Must NEVER show pairing prompt for TV with stored DataStore SSL credentials",
+          viewModel.uiState.value.connectionStatus is com.example.remote.ui.ConnectionStatus.Pairing,
+        )
+        viewModel.uiState.value.connectionStatus is com.example.remote.ui.ConnectionStatus.Connected
+      },
+    )
+
+    keepAliveLatch.countDown()
+    viewModel.disconnect()
+    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+    serverThread.join(1_500L)
+  }
 }
 
 

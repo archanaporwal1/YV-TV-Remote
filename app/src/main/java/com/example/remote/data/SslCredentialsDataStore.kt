@@ -281,9 +281,13 @@ class SslCredentialsDataStore(context: Context) {
       var changed = false
       val updated =
         current.map { existing ->
-          if (normalizeHost(existing.ipAddress) == oldNorm) {
+          if (normalizeHost(existing.ipAddress) == oldNorm || normalizeHost(existing.tvKey) == oldNorm) {
             changed = true
+            val nextTvKey =
+              if (existing.tvKey.isBlank() || normalizeHost(existing.tvKey) == oldNorm) newNorm
+              else existing.tvKey
             existing.copy(
+              tvKey = nextTvKey,
               ipAddress = newNorm,
               controlPort = newPort.takeIf { it in 1..65535 } ?: existing.controlPort,
             )

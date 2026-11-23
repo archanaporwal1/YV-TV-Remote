@@ -43,10 +43,13 @@ import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material.icons.rounded.TouchApp
+import androidx.compose.material.icons.rounded.Tv
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -80,7 +83,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.isSpecified
 import com.example.proto.remote.RemoteKeyCode
 import com.example.remote.data.TvAppShortcut
 import com.example.remote.data.TvAppShortcuts
@@ -256,14 +261,17 @@ fun ClassicDPadPod(
   onKeyHoldEnd: (RemoteKeyCode) -> Unit = {},
   modifier: Modifier = Modifier,
   compact: Boolean = false,
+  targetSize: Dp = Dp.Unspecified,
 ) {
-  val podSize = if (compact) 216.dp else 256.dp
-  val ringSize = if (compact) 198.dp else 236.dp
-  val padInset = if (compact) 10.dp else 14.dp
-  val armLength = if (compact) 70.dp else 80.dp
-  val armBreadth = if (compact) 52.dp else 58.dp
-  val centerSize = if (compact) 74.dp else 86.dp
-  val arrowSize = if (compact) 30.dp else 34.dp
+  val podSize =
+    if (targetSize.isSpecified) targetSize.coerceIn(168.dp, 288.dp)
+    else if (compact) 212.dp else 248.dp
+  val ringSize = podSize * 0.92f
+  val padInset = podSize * 0.052f
+  val armLength = podSize * 0.315f
+  val armBreadth = (podSize * 0.228f).coerceAtLeast(48.dp)
+  val centerSize = podSize * 0.336f
+  val arrowSize = (podSize * 0.132f).coerceIn(24.dp, 36.dp)
 
   val glowColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
   val spokeColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
@@ -427,11 +435,14 @@ fun TouchpadSurfacePod(
   onKey: (RemoteKeyCode, FeedbackCue) -> Unit,
   modifier: Modifier = Modifier,
   compact: Boolean = false,
+  targetHeight: Dp = Dp.Unspecified,
 ) {
   val thresholdPx = with(LocalDensity.current) { 42.dp.toPx() }
   var lastGestureLabel by remember { mutableStateOf("Swipe to navigate • Tap for OK") }
   val primaryCyan = MaterialTheme.colorScheme.primary
-  val padHeight = if (compact) 216.dp else 256.dp
+  val padHeight =
+    if (targetHeight.isSpecified) targetHeight.coerceIn(168.dp, 288.dp)
+    else if (compact) 212.dp else 248.dp
 
   Surface(
     shape = RoundedCornerShape(28.dp),
@@ -525,8 +536,11 @@ fun PrimaryNavigationRow(
   onKeyHoldEnd: (RemoteKeyCode) -> Unit = {},
   modifier: Modifier = Modifier,
   compact: Boolean = false,
+  targetButtonHeight: Dp = Dp.Unspecified,
 ) {
-  val btnHeight = if (compact) 50.dp else 58.dp
+  val btnHeight =
+    if (targetButtonHeight.isSpecified) targetButtonHeight.coerceIn(48.dp, 64.dp)
+    else if (compact) 50.dp else 56.dp
   Row(
     modifier = modifier.fillMaxWidth(),
     horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -632,74 +646,57 @@ fun VolumeAndChannelPod(
   onKey: (RemoteKeyCode, FeedbackCue) -> Unit,
   onKeyHoldStart: (RemoteKeyCode, FeedbackCue) -> Unit = { _, _ -> },
   onKeyHoldEnd: (RemoteKeyCode) -> Unit = {},
+  isListening: Boolean = false,
+  onOpenVoiceInput: () -> Unit = {},
+  onTriggerTvAssistant: () -> Unit = {},
   modifier: Modifier = Modifier,
   compact: Boolean = false,
+  targetConsoleHeight: Dp = Dp.Unspecified,
 ) {
-  val rowHeight = if (compact) 52.dp else 58.dp
+  val consoleHeight =
+    if (targetConsoleHeight.isSpecified) targetConsoleHeight.coerceIn(152.dp, 184.dp)
+    else if (compact) 154.dp else 166.dp
+  val centerButtonHeight = ((consoleHeight - 10.dp) / 3f).coerceAtLeast(48.dp)
   val volDownInteraction = remember { MutableInteractionSource() }
   val volUpInteraction = remember { MutableInteractionSource() }
   val chDownInteraction = remember { MutableInteractionSource() }
   val chUpInteraction = remember { MutableInteractionSource() }
+  val isDarkSurface = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+  val rockerSheen =
+    remember(isDarkSurface) {
+      if (isDarkSurface) {
+        Brush.verticalGradient(
+          listOf(Color.White.copy(alpha = 0.05f), Color.Transparent, Color.Black.copy(alpha = 0.16f))
+        )
+      } else {
+        Brush.verticalGradient(
+          listOf(Color.White.copy(alpha = 0.6f), Color.Transparent, Color.Black.copy(alpha = 0.05f))
+        )
+      }
+    }
 
   Row(
-    modifier = modifier.fillMaxWidth(),
-    horizontalArrangement = Arrangement.spacedBy(10.dp),
+    modifier = modifier.fillMaxWidth().height(consoleHeight),
+    horizontalArrangement = Arrangement.spacedBy(12.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
-    // Volume Rocker
+    // Left Sculpted Vertical Volume Rocker
     Surface(
       color = MaterialTheme.colorScheme.surfaceVariant,
-      shape = RoundedCornerShape(20.dp),
+      shape = RoundedCornerShape(28.dp),
       border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-      modifier = Modifier.weight(1f).height(rowHeight),
+      modifier = Modifier.weight(1f).fillMaxSize(),
     ) {
-      Row(
-        modifier = Modifier.fillMaxSize(),
-        verticalAlignment = Alignment.CenterVertically,
+      Column(
+        modifier = Modifier.fillMaxSize().background(rockerSheen),
+        horizontalAlignment = Alignment.CenterHorizontally,
       ) {
         Box(
           modifier =
             Modifier
               .weight(1f)
-              .fillMaxSize()
-              .clip(RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp))
-              .holdableRemoteGesture(
-                interactionSource = volDownInteraction,
-                contentDescription = "Volume Down",
-                onClick = { onKey(RemoteKeyCode.KEYCODE_VOLUME_DOWN, FeedbackCue.VOLUME_STEP) },
-                onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_VOLUME_DOWN, FeedbackCue.VOLUME_STEP) },
-                onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_VOLUME_DOWN) },
-              )
-              .testTag("btn_vol_down"),
-          contentAlignment = Alignment.Center,
-        ) {
-          Icon(
-            imageVector = Icons.Rounded.Remove,
-            contentDescription = "Volume Down",
-            tint = MaterialTheme.colorScheme.onSurface,
-          )
-        }
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-          Icon(
-            imageVector = Icons.AutoMirrored.Rounded.VolumeUp,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(16.dp),
-          )
-          Text(
-            text = "VOL",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            softWrap = false,
-          )
-        }
-        Box(
-          modifier =
-            Modifier
-              .weight(1f)
-              .fillMaxSize()
-              .clip(RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp))
+              .fillMaxWidth()
+              .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
               .holdableRemoteGesture(
                 interactionSource = volUpInteraction,
                 contentDescription = "Volume Up",
@@ -714,71 +711,176 @@ fun VolumeAndChannelPod(
             imageVector = Icons.Rounded.Add,
             contentDescription = "Volume Up",
             tint = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.size(26.dp),
+          )
+        }
+
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(4.dp),
+          modifier = Modifier.padding(vertical = 2.dp),
+        ) {
+          Icon(
+            imageVector = Icons.AutoMirrored.Rounded.VolumeUp,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(14.dp),
+          )
+          Text(
+            text = "VOL",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            softWrap = false,
+          )
+        }
+
+        Box(
+          modifier =
+            Modifier
+              .weight(1f)
+              .fillMaxWidth()
+              .clip(RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp))
+              .holdableRemoteGesture(
+                interactionSource = volDownInteraction,
+                contentDescription = "Volume Down",
+                onClick = { onKey(RemoteKeyCode.KEYCODE_VOLUME_DOWN, FeedbackCue.VOLUME_STEP) },
+                onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_VOLUME_DOWN, FeedbackCue.VOLUME_STEP) },
+                onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_VOLUME_DOWN) },
+              )
+              .testTag("btn_vol_down"),
+          contentAlignment = Alignment.Center,
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.Remove,
+            contentDescription = "Volume Down",
+            tint = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.size(26.dp),
           )
         }
       }
     }
 
-    // Mute Button
-    TactileKeyButton(
-      onClick = { onKey(RemoteKeyCode.KEYCODE_VOLUME_MUTE, FeedbackCue.VOLUME_STEP) },
-      contentDescription = "Mute",
-      shape = RoundedCornerShape(20.dp),
-      modifier = Modifier.size(56.dp, rowHeight).testTag("btn_mute"),
+    // Center Quick-Action Stack: Voice Mic • Mute • TV Assistant
+    Column(
+      modifier = Modifier.weight(1.05f).fillMaxSize(),
+      verticalArrangement = Arrangement.SpaceBetween,
+      horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-      Icon(
-        imageVector = Icons.AutoMirrored.Rounded.VolumeOff,
+      TactileKeyButton(
+        onClick = onOpenVoiceInput,
+        contentDescription = "Voice Command",
+        shape = RoundedCornerShape(18.dp),
+        containerColor =
+          if (isListening) MaterialTheme.colorScheme.primary
+          else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
+        borderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+        modifier = Modifier.fillMaxWidth().height(centerButtonHeight).testTag("btn_voice_mic"),
+      ) {
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          modifier = Modifier.padding(horizontal = 8.dp),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.Mic,
+            contentDescription = "Voice Command Microphone",
+            tint =
+              if (isListening) MaterialTheme.colorScheme.onPrimary
+              else MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(19.dp),
+          )
+          Text(
+            text = if (isListening) "Listening" else "Voice",
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color =
+              if (isListening) MaterialTheme.colorScheme.onPrimary
+              else MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            softWrap = false,
+          )
+        }
+      }
+
+      TactileKeyButton(
+        onClick = { onKey(RemoteKeyCode.KEYCODE_VOLUME_MUTE, FeedbackCue.VOLUME_STEP) },
         contentDescription = "Mute",
-        tint = MaterialTheme.colorScheme.onSurface,
-      )
+        shape = RoundedCornerShape(18.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+        borderColor = MaterialTheme.colorScheme.outlineVariant,
+        modifier = Modifier.fillMaxWidth().height(centerButtonHeight).testTag("btn_mute"),
+      ) {
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          modifier = Modifier.padding(horizontal = 8.dp),
+        ) {
+          Icon(
+            imageVector = Icons.AutoMirrored.Rounded.VolumeOff,
+            contentDescription = "Mute",
+            tint = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.size(19.dp),
+          )
+          Text(
+            text = "Mute",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            softWrap = false,
+          )
+        }
+      }
+
+      TactileKeyButton(
+        onClick = onTriggerTvAssistant,
+        contentDescription = "TV Assistant",
+        shape = RoundedCornerShape(18.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+        borderColor = MaterialTheme.colorScheme.outlineVariant,
+        modifier = Modifier.fillMaxWidth().height(centerButtonHeight).testTag("btn_tv_voice_assist"),
+      ) {
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          modifier = Modifier.padding(horizontal = 8.dp),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.Tv,
+            contentDescription = "TV Assistant",
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(18.dp),
+          )
+          Text(
+            text = "Assistant",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            softWrap = false,
+          )
+        }
+      }
     }
 
-    // Channel Rocker
+    // Right Sculpted Vertical Channel Rocker
     Surface(
       color = MaterialTheme.colorScheme.surfaceVariant,
-      shape = RoundedCornerShape(20.dp),
+      shape = RoundedCornerShape(28.dp),
       border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-      modifier = Modifier.weight(1f).height(rowHeight),
+      modifier = Modifier.weight(1f).fillMaxSize(),
     ) {
-      Row(
-        modifier = Modifier.fillMaxSize(),
-        verticalAlignment = Alignment.CenterVertically,
+      Column(
+        modifier = Modifier.fillMaxSize().background(rockerSheen),
+        horizontalAlignment = Alignment.CenterHorizontally,
       ) {
         Box(
           modifier =
             Modifier
               .weight(1f)
-              .fillMaxSize()
-              .clip(RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp))
-              .holdableRemoteGesture(
-                interactionSource = chDownInteraction,
-                contentDescription = "Channel Down",
-                onClick = { onKey(RemoteKeyCode.KEYCODE_CHANNEL_DOWN, FeedbackCue.NAV_TICK) },
-                onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_CHANNEL_DOWN, FeedbackCue.NAV_TICK) },
-                onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_CHANNEL_DOWN) },
-              )
-              .testTag("btn_ch_down"),
-          contentAlignment = Alignment.Center,
-        ) {
-          Icon(
-            imageVector = Icons.Rounded.KeyboardArrowDown,
-            contentDescription = "Channel Down",
-            tint = MaterialTheme.colorScheme.onSurface,
-          )
-        }
-        Text(
-          text = "CH",
-          style = MaterialTheme.typography.labelMedium,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
-          maxLines = 1,
-          softWrap = false,
-        )
-        Box(
-          modifier =
-            Modifier
-              .weight(1f)
-              .fillMaxSize()
-              .clip(RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp))
+              .fillMaxWidth()
+              .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
               .holdableRemoteGesture(
                 interactionSource = chUpInteraction,
                 contentDescription = "Channel Up",
@@ -793,6 +895,41 @@ fun VolumeAndChannelPod(
             imageVector = Icons.Rounded.KeyboardArrowUp,
             contentDescription = "Channel Up",
             tint = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.size(28.dp),
+          )
+        }
+
+        Text(
+          text = "CH",
+          style = MaterialTheme.typography.labelSmall,
+          fontWeight = FontWeight.Bold,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          maxLines = 1,
+          softWrap = false,
+          modifier = Modifier.padding(vertical = 2.dp),
+        )
+
+        Box(
+          modifier =
+            Modifier
+              .weight(1f)
+              .fillMaxWidth()
+              .clip(RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp))
+              .holdableRemoteGesture(
+                interactionSource = chDownInteraction,
+                contentDescription = "Channel Down",
+                onClick = { onKey(RemoteKeyCode.KEYCODE_CHANNEL_DOWN, FeedbackCue.NAV_TICK) },
+                onHoldStart = { onKeyHoldStart(RemoteKeyCode.KEYCODE_CHANNEL_DOWN, FeedbackCue.NAV_TICK) },
+                onHoldEnd = { onKeyHoldEnd(RemoteKeyCode.KEYCODE_CHANNEL_DOWN) },
+              )
+              .testTag("btn_ch_down"),
+          contentAlignment = Alignment.Center,
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.KeyboardArrowDown,
+            contentDescription = "Channel Down",
+            tint = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.size(28.dp),
           )
         }
       }
@@ -807,8 +944,11 @@ fun MediaTransportBar(
   onKeyHoldEnd: (RemoteKeyCode) -> Unit = {},
   modifier: Modifier = Modifier,
   compact: Boolean = false,
+  targetBarHeight: Dp = Dp.Unspecified,
 ) {
-  val barHeight = if (compact) 48.dp else 52.dp
+  val barHeight =
+    if (targetBarHeight.isSpecified) targetBarHeight.coerceIn(48.dp, 60.dp)
+    else if (compact) 48.dp else 52.dp
   Row(
     modifier = modifier.fillMaxWidth(),
     horizontalArrangement = Arrangement.spacedBy(8.dp),

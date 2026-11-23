@@ -184,7 +184,7 @@ class CertificateManager(
     if (!forceRegenerate && legacyKeystoreFile.exists() && legacyKeystoreFile.length() > 0L) {
       val legacyBytes = runCatching { legacyKeystoreFile.readBytes() }.getOrNull()
       val loadedLegacy = legacyBytes?.let { loadKeyStoreFromBytes(it) }
-      if (loadedLegacy != null && legacyBytes != null) {
+      if (loadedLegacy != null) {
         val cert = loadedLegacy.getCertificate(KEY_ALIAS) as X509Certificate
         val tag = extractDeviceTag(cert)
         val migratedIdentity =

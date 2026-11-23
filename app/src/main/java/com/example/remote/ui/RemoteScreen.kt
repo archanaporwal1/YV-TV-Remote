@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -39,7 +40,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.CastConnected
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.PowerSettingsNew
@@ -51,15 +54,18 @@ import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -77,6 +83,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -350,6 +357,7 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
             onOpenConnectionHub = { viewModel.openConnectionHub() },
             onOpenCustomizeUi = { viewModel.openCustomizeUiSheet(true) },
             onOpenSettings = { viewModel.openSettingsSheet(true) },
+            onOpenOttApps = { viewModel.openOttAppsSheet(true) },
             onOpenKeyboard = { viewModel.openKeyboardSheet(true) },
             onOpenSearch = { viewModel.openSearchWithKeyboard() },
             onOpenVoiceInput = triggerVoiceInputFlow,
@@ -567,6 +575,26 @@ fun YvTvRemoteApp(viewModel: RemoteViewModel) {
     )
   }
 
+  if (uiState.showOttAppsSheet) {
+    val ottShortcuts =
+      remember(uiState.uiPreferences.enabledShortcutIds, uiState.uiPreferences.customShortcuts) {
+        uiState.uiPreferences.enabledShortcuts()
+      }
+    OttAppsDrawerSheet(
+      shortcuts = ottShortcuts,
+      columns = uiState.uiPreferences.shortcutColumns,
+      compact = uiState.uiPreferences.compactMode,
+      verifiedOnTvIds = uiState.verifiedOnTvShortcutIds,
+      onLaunchShortcut = { viewModel.launchShortcut(it) },
+      onAddOttApp = { showAddOttDialog = true },
+      onOpenCustomize = {
+        viewModel.openOttAppsSheet(false)
+        viewModel.openCustomizeUiSheet(true)
+      },
+      onDismiss = { viewModel.openOttAppsSheet(false) },
+    )
+  }
+
   if (uiState.showKeyboardSheet) {
     KeyboardSearchSheet(
       imeState = uiState.tvImeState,
@@ -646,6 +674,7 @@ fun RemoteControlScreen(
   onOpenConnectionHub: () -> Unit,
   onOpenCustomizeUi: () -> Unit,
   onOpenSettings: () -> Unit,
+  onOpenOttApps: () -> Unit = {},
   onOpenKeyboard: () -> Unit,
   onOpenSearch: () -> Unit = onOpenKeyboard,
   onOpenVoiceInput: () -> Unit = {},
@@ -663,7 +692,7 @@ fun RemoteControlScreen(
 ) {
   val uiPrefs = uiState.uiPreferences
   val compact = uiPrefs.compactMode
-  val sectionSpacing = if (compact) 10.dp else 16.dp
+  val sectionSpacing = if (compact) 10.dp else 14.dp
   val filteredShortcuts =
     remember(uiPrefs.enabledShortcutIds, uiPrefs.customShortcuts) {
       uiPrefs.enabledShortcuts()
@@ -676,14 +705,81 @@ fun RemoteControlScreen(
     contentAlignment = Alignment.TopCenter,
   ) {
     BoxWithConstraints(
-      modifier = Modifier.widthIn(max = 920.dp).fillMaxSize().padding(horizontal = 18.dp),
+      modifier =
+        Modifier
+          .widthIn(max = 960.dp)
+          .fillMaxSize()
+          .padding(horizontal = 16.dp),
     ) {
-      val isWideLayout = maxWidth >= 680.dp
+      val availWidth = maxWidth
+      val availHeight = maxHeight
+      val isWideLayout = availWidth >= 660.dp || (availWidth > availHeight && availWidth >= 540.dp)
+      val isNarrowWidth = availWidth < 370.dp
+
+      // Adaptive viewport sizing so the entire remote fits smoothly without scrolling
+      // on typical handhelds, compact phones, foldables, and tablets.
+      val topChromeEstimate = 68.dp
+      val bannerReserve =
+        (if (uiState.connectionStatus is ConnectionStatus.Error) 86.dp else 0.dp) +
+          (if (uiState.availableUpdate != null) 66.dp else 0.dp)
+      val bodyBudget = (availHeight - topChromeEstimate - bannerReserve).coerceAtLeast(360.dp)
+
+      val adaptiveGap: Dp
+      val adaptivePodSize: Dp
+      val adaptiveNavHeight: Dp
+      val adaptiveConsoleHeight: Dp
+      val adaptiveMediaHeight: Dp
+
+      if (isWideLayout) {
+        adaptiveGap =
+          if (compact) 8.dp
+          else ((bodyBudget - 340.dp) * 0.08f).coerceIn(10.dp, 18.dp)
+        val columnBudget = (bodyBudget - adaptiveGap * 2).coerceAtLeast(240.dp)
+        val maxPodByHeight = columnBudget - 48.dp - if (uiPrefs.showNavigationRow) 54.dp + adaptiveGap else 0.dp
+        val maxPodByColWidth = (availWidth / 2f) - 48.dp
+        adaptivePodSize =
+          minOf(maxPodByHeight, maxPodByColWidth, if (compact) 232.dp else 268.dp).coerceAtLeast(168.dp)
+        adaptiveNavHeight = (columnBudget * 0.14f).coerceIn(48.dp, 58.dp)
+        adaptiveConsoleHeight = (columnBudget * 0.48f).coerceIn(154.dp, 182.dp)
+        adaptiveMediaHeight = (columnBudget * 0.14f).coerceIn(48.dp, 56.dp)
+      } else {
+        val headerRowHeight = 48.dp
+        val showNav = uiPrefs.showNavigationRow
+        val showVol = uiPrefs.showVolumeAndChannel
+        val showMedia = uiPrefs.showMediaTransport
+        val activeSections =
+          2 + (if (showNav) 1 else 0) + 1 + (if (showMedia) 1 else 0) // Header + Pad + Nav? + Vol/Voice + Media?
+        val baseGapCount = (activeSections - 1).coerceAtLeast(1)
+
+        adaptiveNavHeight =
+          if (!showNav) 0.dp
+          else (bodyBudget * 0.082f).coerceIn(48.dp, if (compact) 52.dp else 56.dp)
+        adaptiveConsoleHeight =
+          if (!showVol) 48.dp
+          else (bodyBudget * 0.235f).coerceIn(152.dp, if (compact) 158.dp else 172.dp)
+        adaptiveMediaHeight =
+          if (!showMedia) 0.dp
+          else (bodyBudget * 0.078f).coerceIn(48.dp, if (compact) 50.dp else 54.dp)
+
+        val minGap = if (compact) 6.dp else 8.dp
+        val maxGap = if (compact) 10.dp else 14.dp
+        val fixedRowsHeight = headerRowHeight + adaptiveNavHeight + adaptiveConsoleHeight + adaptiveMediaHeight
+        val remainingForPadAndGaps = (bodyBudget - fixedRowsHeight).coerceAtLeast(190.dp)
+        val idealGap = ((remainingForPadAndGaps - 210.dp) / baseGapCount).coerceIn(minGap, maxGap)
+        adaptiveGap = idealGap
+
+        val maxPodByWidth = (availWidth - 40.dp).coerceAtLeast(172.dp)
+        val maxPodByHeight = (remainingForPadAndGaps - idealGap * baseGapCount).coerceAtLeast(172.dp)
+        val targetCap = if (compact) 224.dp else 258.dp
+        adaptivePodSize = minOf(maxPodByWidth, maxPodByHeight, targetCap).coerceAtLeast(168.dp)
+      }
+
+      val horizontalPadding = if (isNarrowWidth) 0.dp else 2.dp
 
       Column(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier.fillMaxSize().padding(horizontal = horizontalPadding),
       ) {
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(if (availHeight < 660.dp) 6.dp else 10.dp))
         RemoteTopTelemetryBar(
           status = uiState.connectionStatus,
           activeProfileName = activeProfileName,
@@ -692,97 +788,194 @@ fun RemoteControlScreen(
           onOpenSettings = onOpenSettings,
           onPowerClick = { onSendKey(RemoteKeyCode.KEYCODE_POWER, FeedbackCue.POWER_OR_APP) },
         )
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(if (availHeight < 660.dp) 4.dp else 8.dp))
 
         Column(
-          modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(vertical = 4.dp),
-          verticalArrangement = Arrangement.spacedBy(sectionSpacing),
+          modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(vertical = 2.dp),
+          verticalArrangement = Arrangement.spacedBy(adaptiveGap),
         ) {
-        val errorStatus = uiState.connectionStatus as? ConnectionStatus.Error
-        AnimatedVisibility(visible = errorStatus != null) {
-          errorStatus?.let { err ->
-            RemoteDiagnosticBanner(
-              error = err,
-              onRepairClick = onRepairConnection,
-              onRetryClick = onRetryConnection,
+          val errorStatus = uiState.connectionStatus as? ConnectionStatus.Error
+          AnimatedVisibility(visible = errorStatus != null) {
+            errorStatus?.let { err ->
+              RemoteDiagnosticBanner(
+                error = err,
+                onRepairClick = onRepairConnection,
+                onRetryClick = onRetryConnection,
+              )
+            }
+          }
+
+          uiState.availableUpdate?.let { release ->
+            UpdateAvailableBannerCard(
+              release = release,
+              onDownloadClick = onDownloadUpdate,
+              onDetailsClick = onOpenUpdateDetails,
             )
           }
-        }
 
-        uiState.availableUpdate?.let { release ->
-          UpdateAvailableBannerCard(
-            release = release,
-            onDownloadClick = onDownloadUpdate,
-            onDetailsClick = onOpenUpdateDetails,
-          )
-        }
+          if (isWideLayout) {
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.spacedBy(20.dp),
+              verticalAlignment = Alignment.Top,
+            ) {
+              Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(adaptiveGap),
+              ) {
+                ModeAndKeyboardHeaderRow(
+                  mode = uiState.inputMode,
+                  isImeRequested = uiState.tvImeState.isImeRequested,
+                  showQuickSearchBar = uiPrefs.showQuickSearchBar,
+                  narrowWidth = isNarrowWidth,
+                  onSwitch = onSwitchInputMode,
+                  onOpenKeyboard = onOpenKeyboard,
+                  onOpenSearch = onOpenSearch,
+                  onOpenOttApps = onOpenOttApps,
+                )
+                if (uiState.inputMode == RemoteInputMode.DPAD) {
+                  ClassicDPadPod(
+                    onKey = onSendKey,
+                    onKeyHoldStart = onKeyHoldStart,
+                    onKeyHoldEnd = onKeyHoldEnd,
+                    compact = compact,
+                    targetSize = adaptivePodSize,
+                  )
+                } else {
+                  TouchpadSurfacePod(
+                    onKey = onSendKey,
+                    compact = compact,
+                    targetHeight = adaptivePodSize,
+                  )
+                }
+                AnimatedVisibility(visible = uiPrefs.showNavigationRow) {
+                  PrimaryNavigationRow(
+                    onKey = onSendKey,
+                    onKeyHoldStart = onKeyHoldStart,
+                    onKeyHoldEnd = onKeyHoldEnd,
+                    compact = compact,
+                    targetButtonHeight = adaptiveNavHeight,
+                  )
+                }
+              }
 
-        if (isWideLayout) {
-          Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(24.dp),
-            verticalAlignment = Alignment.Top,
-          ) {
+              Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(adaptiveGap),
+              ) {
+                if (uiPrefs.showVolumeAndChannel) {
+                  VolumeAndChannelPod(
+                    onKey = onSendKey,
+                    onKeyHoldStart = onKeyHoldStart,
+                    onKeyHoldEnd = onKeyHoldEnd,
+                    isListening = uiState.voiceState.isListening,
+                    onOpenVoiceInput = onOpenVoiceInput,
+                    onTriggerTvAssistant = onTriggerTvVoiceAssistant,
+                    compact = compact,
+                    targetConsoleHeight = adaptiveConsoleHeight,
+                  )
+                } else {
+                  CompactVoiceQuickStrip(
+                    isListening = uiState.voiceState.isListening,
+                    onOpenVoiceInput = onOpenVoiceInput,
+                    onTriggerTvAssistant = onTriggerTvVoiceAssistant,
+                  )
+                }
+                AnimatedVisibility(visible = uiPrefs.showMediaTransport) {
+                  MediaTransportBar(
+                    onKey = onSendKey,
+                    onKeyHoldStart = onKeyHoldStart,
+                    onKeyHoldEnd = onKeyHoldEnd,
+                    compact = compact,
+                    targetBarHeight = adaptiveMediaHeight,
+                  )
+                }
+                AnimatedVisibility(visible = uiPrefs.showStreamingShortcuts) {
+                  StreamingShortcutsGrid(
+                    onLaunchShortcut = onLaunchShortcut,
+                    shortcuts = filteredShortcuts,
+                    columns = uiPrefs.shortcutColumns,
+                    compact = compact,
+                    verifiedOnTvIds = uiState.verifiedOnTvShortcutIds,
+                    onOpenCustomize = onOpenCustomizeUi,
+                    onAddOttApp = onOpenAddOttDialog,
+                  )
+                }
+              }
+            }
+          } else {
             Column(
-              modifier = Modifier.weight(1f),
+              modifier = Modifier.fillMaxWidth(),
               horizontalAlignment = Alignment.CenterHorizontally,
-              verticalArrangement = Arrangement.spacedBy(if (compact) 10.dp else 14.dp),
+              verticalArrangement = Arrangement.spacedBy(adaptiveGap),
             ) {
               ModeAndKeyboardHeaderRow(
                 mode = uiState.inputMode,
                 isImeRequested = uiState.tvImeState.isImeRequested,
                 showQuickSearchBar = uiPrefs.showQuickSearchBar,
+                narrowWidth = isNarrowWidth,
                 onSwitch = onSwitchInputMode,
                 onOpenKeyboard = onOpenKeyboard,
                 onOpenSearch = onOpenSearch,
+                onOpenOttApps = onOpenOttApps,
               )
-              VoiceCommandBar(
-                isListening = uiState.voiceState.isListening,
-                lastTranscript = uiState.voiceState.lastTranscript,
-                compact = compact,
-                onOpenVoiceInput = onOpenVoiceInput,
-                onTriggerTvAssistant = onTriggerTvVoiceAssistant,
-              )
+
               if (uiState.inputMode == RemoteInputMode.DPAD) {
                 ClassicDPadPod(
                   onKey = onSendKey,
                   onKeyHoldStart = onKeyHoldStart,
                   onKeyHoldEnd = onKeyHoldEnd,
                   compact = compact,
+                  targetSize = adaptivePodSize,
                 )
               } else {
-                TouchpadSurfacePod(onKey = onSendKey, compact = compact)
+                TouchpadSurfacePod(
+                  onKey = onSendKey,
+                  compact = compact,
+                  targetHeight = adaptivePodSize,
+                )
               }
+
               AnimatedVisibility(visible = uiPrefs.showNavigationRow) {
                 PrimaryNavigationRow(
                   onKey = onSendKey,
                   onKeyHoldStart = onKeyHoldStart,
                   onKeyHoldEnd = onKeyHoldEnd,
                   compact = compact,
+                  targetButtonHeight = adaptiveNavHeight,
                 )
               }
-            }
 
-            Column(
-              modifier = Modifier.weight(1f),
-              verticalArrangement = Arrangement.spacedBy(sectionSpacing),
-            ) {
-              AnimatedVisibility(visible = uiPrefs.showVolumeAndChannel) {
+              if (uiPrefs.showVolumeAndChannel) {
                 VolumeAndChannelPod(
                   onKey = onSendKey,
                   onKeyHoldStart = onKeyHoldStart,
                   onKeyHoldEnd = onKeyHoldEnd,
+                  isListening = uiState.voiceState.isListening,
+                  onOpenVoiceInput = onOpenVoiceInput,
+                  onTriggerTvAssistant = onTriggerTvVoiceAssistant,
                   compact = compact,
+                  targetConsoleHeight = adaptiveConsoleHeight,
+                )
+              } else {
+                CompactVoiceQuickStrip(
+                  isListening = uiState.voiceState.isListening,
+                  onOpenVoiceInput = onOpenVoiceInput,
+                  onTriggerTvAssistant = onTriggerTvVoiceAssistant,
                 )
               }
+
               AnimatedVisibility(visible = uiPrefs.showMediaTransport) {
                 MediaTransportBar(
                   onKey = onSendKey,
                   onKeyHoldStart = onKeyHoldStart,
                   onKeyHoldEnd = onKeyHoldEnd,
                   compact = compact,
+                  targetBarHeight = adaptiveMediaHeight,
                 )
               }
+
               AnimatedVisibility(visible = uiPrefs.showStreamingShortcuts) {
                 StreamingShortcutsGrid(
                   onLaunchShortcut = onLaunchShortcut,
@@ -796,78 +989,8 @@ fun RemoteControlScreen(
               }
             }
           }
-        } else {
-          Column(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(if (compact) 10.dp else 14.dp),
-          ) {
-            ModeAndKeyboardHeaderRow(
-              mode = uiState.inputMode,
-              isImeRequested = uiState.tvImeState.isImeRequested,
-              showQuickSearchBar = uiPrefs.showQuickSearchBar,
-              onSwitch = onSwitchInputMode,
-              onOpenKeyboard = onOpenKeyboard,
-              onOpenSearch = onOpenSearch,
-            )
-            VoiceCommandBar(
-              isListening = uiState.voiceState.isListening,
-              lastTranscript = uiState.voiceState.lastTranscript,
-              compact = compact,
-              onOpenVoiceInput = onOpenVoiceInput,
-              onTriggerTvAssistant = onTriggerTvVoiceAssistant,
-            )
 
-            if (uiState.inputMode == RemoteInputMode.DPAD) {
-              ClassicDPadPod(
-                onKey = onSendKey,
-                onKeyHoldStart = onKeyHoldStart,
-                onKeyHoldEnd = onKeyHoldEnd,
-                compact = compact,
-              )
-            } else {
-              TouchpadSurfacePod(onKey = onSendKey, compact = compact)
-            }
-
-            AnimatedVisibility(visible = uiPrefs.showNavigationRow) {
-              PrimaryNavigationRow(
-                onKey = onSendKey,
-                onKeyHoldStart = onKeyHoldStart,
-                onKeyHoldEnd = onKeyHoldEnd,
-                compact = compact,
-              )
-            }
-            AnimatedVisibility(visible = uiPrefs.showVolumeAndChannel) {
-              VolumeAndChannelPod(
-                onKey = onSendKey,
-                onKeyHoldStart = onKeyHoldStart,
-                onKeyHoldEnd = onKeyHoldEnd,
-                compact = compact,
-              )
-            }
-            AnimatedVisibility(visible = uiPrefs.showMediaTransport) {
-              MediaTransportBar(
-                onKey = onSendKey,
-                onKeyHoldStart = onKeyHoldStart,
-                onKeyHoldEnd = onKeyHoldEnd,
-                compact = compact,
-              )
-            }
-            AnimatedVisibility(visible = uiPrefs.showStreamingShortcuts) {
-              StreamingShortcutsGrid(
-                onLaunchShortcut = onLaunchShortcut,
-                shortcuts = filteredShortcuts,
-                columns = uiPrefs.shortcutColumns,
-                compact = compact,
-                verifiedOnTvIds = uiState.verifiedOnTvShortcutIds,
-                onOpenCustomize = onOpenCustomizeUi,
-                onAddOttApp = onOpenAddOttDialog,
-              )
-            }
-          }
-        }
-
-          Spacer(Modifier.height(12.dp))
+          Spacer(Modifier.height(6.dp))
         }
       }
     }
@@ -1113,9 +1236,11 @@ private fun ModeAndKeyboardHeaderRow(
   mode: RemoteInputMode,
   isImeRequested: Boolean,
   showQuickSearchBar: Boolean,
+  narrowWidth: Boolean = false,
   onSwitch: (RemoteInputMode) -> Unit,
   onOpenKeyboard: () -> Unit,
   onOpenSearch: () -> Unit,
+  onOpenOttApps: () -> Unit,
 ) {
   Row(
     modifier = Modifier.fillMaxWidth(),
@@ -1124,11 +1249,15 @@ private fun ModeAndKeyboardHeaderRow(
   ) {
     InputModeSwitcher(
       mode = mode,
+      compactPills = narrowWidth,
       onSwitch = onSwitch,
     )
 
-    AnimatedVisibility(visible = showQuickSearchBar) {
-      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Row(
+      horizontalArrangement = Arrangement.spacedBy(if (narrowWidth) 6.dp else 8.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      if (showQuickSearchBar) {
         TactileKeyButton(
           onClick = onOpenSearch,
           contentDescription = "TV Search",
@@ -1167,42 +1296,66 @@ private fun ModeAndKeyboardHeaderRow(
           )
         }
       }
+
+      // On-demand OTT Apps Drawer Trigger (OTT apps shown only when requested)
+      TactileKeyButton(
+        onClick = onOpenOttApps,
+        contentDescription = "OTT Apps",
+        shape = RoundedCornerShape(999.dp),
+        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
+        borderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f),
+        modifier = Modifier.height(48.dp).testTag("btn_open_ott_apps"),
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = if (narrowWidth) 10.dp else 12.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.Apps,
+            contentDescription = "Open OTT Apps",
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(18.dp),
+          )
+          if (!narrowWidth) {
+            Text(
+              text = "Apps",
+              style = MaterialTheme.typography.labelLarge,
+              fontWeight = FontWeight.SemiBold,
+              color = MaterialTheme.colorScheme.primary,
+              maxLines = 1,
+              softWrap = false,
+            )
+          }
+        }
+      }
     }
   }
 }
 
 @Composable
-private fun VoiceCommandBar(
+private fun CompactVoiceQuickStrip(
   isListening: Boolean,
-  lastTranscript: String,
-  compact: Boolean,
   onOpenVoiceInput: () -> Unit,
   onTriggerTvAssistant: () -> Unit,
 ) {
-  val barHeight = if (compact) 48.dp else 52.dp
   Row(
     modifier = Modifier.fillMaxWidth(),
-    horizontalArrangement = Arrangement.spacedBy(8.dp),
-    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(10.dp),
   ) {
-    Surface(
-      color =
-        if (isListening) MaterialTheme.colorScheme.primary
-        else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
+    TactileKeyButton(
+      onClick = onOpenVoiceInput,
+      contentDescription = "Voice Command",
       shape = RoundedCornerShape(16.dp),
-      border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.65f)),
-      modifier =
-        Modifier
-          .weight(1f)
-          .height(barHeight)
-          .clip(RoundedCornerShape(16.dp))
-          .clickable(onClick = onOpenVoiceInput)
-          .testTag("btn_voice_mic"),
+      containerColor =
+        if (isListening) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
+      borderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.65f),
+      modifier = Modifier.weight(1f).height(48.dp).testTag("btn_voice_mic"),
     ) {
       Row(
-        modifier = Modifier.padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
       ) {
         Icon(
           imageVector = Icons.Rounded.Mic,
@@ -1210,31 +1363,18 @@ private fun VoiceCommandBar(
           tint =
             if (isListening) MaterialTheme.colorScheme.onPrimary
             else MaterialTheme.colorScheme.primary,
-          modifier = Modifier.size(22.dp),
+          modifier = Modifier.size(19.dp),
         )
-        Column(modifier = Modifier.weight(1f)) {
-          Text(
-            text = if (isListening) "Listening…" else "Voice Command",
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.Bold,
-            color =
-              if (isListening) MaterialTheme.colorScheme.onPrimary
-              else MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-          )
-          Text(
-            text =
-              if (lastTranscript.isNotBlank()) "Last: \"$lastTranscript\""
-              else "Speak to control, open apps, or search TV",
-            style = MaterialTheme.typography.labelSmall,
-            color =
-              if (isListening) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f)
-              else MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-          )
-        }
+        Text(
+          text = if (isListening) "Listening…" else "Voice Command",
+          style = MaterialTheme.typography.labelLarge,
+          fontWeight = FontWeight.SemiBold,
+          color =
+            if (isListening) MaterialTheme.colorScheme.onPrimary
+            else MaterialTheme.colorScheme.onSurface,
+          maxLines = 1,
+          softWrap = false,
+        )
       }
     }
 
@@ -1244,12 +1384,12 @@ private fun VoiceCommandBar(
       shape = RoundedCornerShape(16.dp),
       containerColor = MaterialTheme.colorScheme.surface,
       borderColor = MaterialTheme.colorScheme.outlineVariant,
-      modifier = Modifier.height(barHeight).testTag("btn_tv_voice_assist"),
+      modifier = Modifier.height(48.dp).testTag("btn_tv_voice_assist"),
     ) {
       Row(
-        modifier = Modifier.padding(horizontal = 12.dp),
+        modifier = Modifier.padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
       ) {
         Icon(
           imageVector = Icons.Rounded.Tv,
@@ -1259,7 +1399,7 @@ private fun VoiceCommandBar(
         )
         Text(
           text = "Assistant",
-          style = MaterialTheme.typography.labelMedium,
+          style = MaterialTheme.typography.labelLarge,
           color = MaterialTheme.colorScheme.onSurface,
           maxLines = 1,
           softWrap = false,
@@ -1269,9 +1409,103 @@ private fun VoiceCommandBar(
   }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun OttAppsDrawerSheet(
+  shortcuts: List<TvAppShortcut>,
+  columns: Int,
+  compact: Boolean,
+  verifiedOnTvIds: Set<String>,
+  onLaunchShortcut: (TvAppShortcut) -> Unit,
+  onAddOttApp: () -> Unit,
+  onOpenCustomize: () -> Unit,
+  onDismiss: () -> Unit,
+) {
+  val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+  ModalBottomSheet(
+    onDismissRequest = onDismiss,
+    sheetState = sheetState,
+    containerColor = MaterialTheme.colorScheme.surface,
+    contentColor = MaterialTheme.colorScheme.onSurface,
+  ) {
+    Column(
+      modifier =
+        Modifier
+          .fillMaxWidth()
+          .navigationBarsPadding()
+          .verticalScroll(rememberScrollState())
+          .padding(horizontal = 20.dp)
+          .padding(bottom = 28.dp)
+          .testTag("ott_apps_sheet"),
+      verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+      ) {
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(10.dp),
+          modifier = Modifier.weight(1f),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.Apps,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+          )
+          Column {
+            Text(
+              text = "OTT Apps",
+              style = MaterialTheme.typography.headlineSmall,
+              fontWeight = FontWeight.Bold,
+            )
+            Text(
+              text = "Tap any app to launch directly on your TV",
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+          }
+        }
+        IconButton(
+          onClick = onOpenCustomize,
+          modifier = Modifier.size(48.dp).testTag("ott_apps_customize_button"),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.Tune,
+            contentDescription = "Customize OTT Apps",
+            tint = MaterialTheme.colorScheme.primary,
+          )
+        }
+        IconButton(
+          onClick = onDismiss,
+          modifier = Modifier.size(48.dp).testTag("ott_apps_close_button"),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.Close,
+            contentDescription = "Close OTT Apps",
+          )
+        }
+      }
+
+      StreamingShortcutsGrid(
+        onLaunchShortcut = onLaunchShortcut,
+        shortcuts = shortcuts,
+        columns = columns,
+        compact = compact,
+        verifiedOnTvIds = verifiedOnTvIds,
+        onOpenCustomize = onOpenCustomize,
+        onAddOttApp = onAddOttApp,
+      )
+    }
+  }
+}
+
 @Composable
 private fun InputModeSwitcher(
   mode: RemoteInputMode,
+  compactPills: Boolean = false,
   onSwitch: (RemoteInputMode) -> Unit,
 ) {
   Surface(
@@ -1280,13 +1514,14 @@ private fun InputModeSwitcher(
     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
   ) {
     Row(
-      modifier = Modifier.padding(4.dp),
-      horizontalArrangement = Arrangement.spacedBy(4.dp),
+      modifier = Modifier.padding(3.dp),
+      horizontalArrangement = Arrangement.spacedBy(3.dp),
     ) {
       ModePillOption(
         selected = mode == RemoteInputMode.DPAD,
         icon = null,
         label = "D-Pad",
+        compact = compactPills,
         testTag = "mode_dpad_button",
         onClick = { onSwitch(RemoteInputMode.DPAD) },
       )
@@ -1294,6 +1529,7 @@ private fun InputModeSwitcher(
         selected = mode == RemoteInputMode.TOUCHPAD,
         icon = Icons.Rounded.TouchApp,
         label = "Touchpad",
+        compact = compactPills,
         testTag = "mode_touchpad_button",
         onClick = { onSwitch(RemoteInputMode.TOUCHPAD) },
       )
@@ -1306,6 +1542,7 @@ private fun ModePillOption(
   selected: Boolean,
   icon: androidx.compose.ui.graphics.vector.ImageVector?,
   label: String,
+  compact: Boolean = false,
   testTag: String,
   onClick: () -> Unit,
 ) {
@@ -1321,9 +1558,9 @@ private fun ModePillOption(
         .testTag(testTag),
   ) {
     Row(
-      modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+      modifier = Modifier.padding(horizontal = if (compact) 8.dp else 12.dp, vertical = 8.dp),
       verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(5.dp),
+      horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 5.dp),
     ) {
       val iconTint =
         if (selected) MaterialTheme.colorScheme.primary
@@ -1343,7 +1580,7 @@ private fun ModePillOption(
       }
       Text(
         text = label,
-        style = MaterialTheme.typography.labelLarge,
+        style = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelLarge,
         fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
         color =
           if (selected) MaterialTheme.colorScheme.primary

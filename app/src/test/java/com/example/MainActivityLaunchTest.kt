@@ -65,11 +65,18 @@ class MainActivityLaunchTest {
     composeTestRule.onNodeWithTag("btn_power").assertIsDisplayed()
     composeTestRule.onNodeWithTag("dpad_center").assertIsDisplayed()
 
-    // Scroll to Quick-Launch Streaming OTT icons
+    // OTT apps stay hidden on the clean main remote screen until requested by user
+    composeTestRule.onNodeWithTag("shortcut_youtube").assertDoesNotExist()
+    composeTestRule.onNodeWithTag("btn_open_ott_apps").assertIsDisplayed()
+
+    // Request OTT Apps on demand via Apps button
+    composeTestRule.onNodeWithTag("btn_open_ott_apps").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("ott_apps_sheet").assertIsDisplayed()
     composeTestRule.onNodeWithTag("shortcut_youtube").performScrollTo().assertIsDisplayed()
     composeTestRule.onNodeWithTag("shortcut_jiotv").performScrollTo().assertIsDisplayed()
 
-    // Open Add OTT App dialog from remote grid -> 1-tap add Spotify
+    // Open Add OTT App dialog from OTT Apps drawer -> 1-tap add Spotify
     composeTestRule.onNodeWithTag("remote_add_ott_button").performScrollTo().performClick()
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithTag("quick_add_ott_spotify").performClick()
@@ -85,6 +92,19 @@ class MainActivityLaunchTest {
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithText("Tubi TV").performScrollTo().assertIsDisplayed()
 
+    // Close OTT Apps drawer -> main remote remains uncluttered
+    composeTestRule.onNodeWithTag("ott_apps_close_button").performScrollTo().performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("ott_apps_sheet").assertDoesNotExist()
+    composeTestRule.onNodeWithTag("shortcut_youtube").assertDoesNotExist()
+
+    // Tapping in-app Search icon immediately pops up Keyboard & Search sheet
+    composeTestRule.onNodeWithTag("btn_tv_search").performScrollTo().performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("keyboard_search_input").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("keyboard_close_button").performClick()
+    composeTestRule.waitForIdle()
+
     // Switch to Touchpad and back to D-Pad
     composeTestRule.onNodeWithTag("mode_touchpad_button").performScrollTo().performClick()
     composeTestRule.waitForIdle()
@@ -94,7 +114,7 @@ class MainActivityLaunchTest {
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithTag("dpad_center").assertIsDisplayed()
 
-    // Verify Microphone Voice Command bar & Voice Command Sheet
+    // Verify Microphone Voice Command & TV Assistant inside sculpted rocker console
     composeTestRule.onNodeWithTag("btn_voice_mic").performScrollTo().assertIsDisplayed()
     composeTestRule.onNodeWithTag("btn_tv_voice_assist").performScrollTo().assertIsDisplayed()
     composeTestRule.onNodeWithTag("btn_voice_mic").performClick()
@@ -118,7 +138,7 @@ class MainActivityLaunchTest {
     composeTestRule.waitForIdle()
 
     // Open Keyboard sheet, test Voice handoff from keyboard, and close cleanly
-    composeTestRule.onNodeWithTag("btn_open_keyboard").performClick()
+    composeTestRule.onNodeWithTag("btn_open_keyboard").performScrollTo().performClick()
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithTag("keyboard_search_input").assertIsDisplayed()
     composeTestRule.onNodeWithTag("keyboard_voice_btn").performClick()

@@ -227,7 +227,11 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
   private fun observeSslCredentials() {
     viewModelScope.launch(safeCoroutineHandler) {
       sslCredentialsStore.pairedCredentialsFlow.collect { credentials ->
-        pairedCredentialHosts = credentials.map { it.hostKey }.toSet()
+        pairedCredentialHosts =
+          credentials
+            .flatMap { listOf(SslCredentialsDataStore.normalizeHost(it.ipAddress), SslCredentialsDataStore.normalizeHost(it.tvKey)) }
+            .filter { it.isNotEmpty() }
+            .toSet()
       }
     }
   }
@@ -532,7 +536,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                           ipAddress = target.ipAddress,
                           controlPort = target.controlPort,
                           serverName = target.deviceName,
-                          serverCertFingerprintSha256 = serverFp,
+                          serverFingerprintSha256 = serverFp,
                         )
                       } else {
                         certificateManager.savePairedTvCredential(
